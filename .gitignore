@@ -1,0 +1,21 @@
+# Секреты
+.env
+*.env
+.env.local
+.env.production
+.env.development
+
+# Приватные данные
+data/
+historical_predictions.jsonl
+calibration.db
+
+# Личные ключи
+**/*private_key*
+**/*PRIVATE_KEY*
+**/*secret*
+
+# Логи и кэш
+*.log
+__pycache__/
+.DS_Store
