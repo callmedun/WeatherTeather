@@ -5,7 +5,6 @@ import json
 import httpx
 import traceback
 from src.utils import logger, send_telegram_message
-from src.calibration import calibration_engine
 from config.settings import config
 from py_clob_client.clob_types import OrderArgs
 import os
@@ -316,6 +315,7 @@ class PortfolioManager:
                                     if sell_shares >= int(shares):
                                         trade.status = "SOLD"
                                         trade.resolved_at = datetime.utcnow()
+                                        from src.calibration import calibration_engine
                                         calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None)
                                     else:
                                         # Reduce size
@@ -332,9 +332,10 @@ class PortfolioManager:
                             msg = f"🔔 <b>[DRY_RUN EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Shares:</b> {sell_shares}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                             await send_telegram_message(msg)
                             if sell_shares >= int(shares):
-                                trade.status = "SOLD"
-                                trade.resolved_at = datetime.utcnow()
-                                calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None)
+                                        trade.status = "SOLD"
+                                        trade.resolved_at = datetime.utcnow()
+                                        from src.calibration import calibration_engine
+                                        calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None)
                             session.commit()
 
         except Exception as e:
