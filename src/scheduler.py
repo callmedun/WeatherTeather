@@ -115,6 +115,16 @@ class BotScheduler:
             replace_existing=True
         )
         
+        # Schedule the 30-minute active trade monitor
+        logger.info("[SCHEDULER] monitor_open_trades started every 30 minutes")
+        self.scheduler.add_job(
+            self.monitor_open_trades_task,
+            "interval",
+            minutes=30,
+            id="monitor_open_trades",
+            replace_existing=True
+        )
+        
         # Schedule the resolution checker to update the calibration module
         self.scheduler.add_job(
             calibration_engine.check_resolutions,
@@ -140,3 +150,12 @@ class BotScheduler:
         
         # Run standard scan independently of cron for first boot
         await self.scan_and_trade()
+        
+        # Give API a breather before checking positions immediately on boot
+        await asyncio.sleep(5)
+        await self.monitor_open_trades_task()
+
+    async def monitor_open_trades_task(self):
+        from src.portfolio_manager import portfolio_manager
+        logger.info("[SCHEDULER] Running scheduled 30-minute open trades monitor...")
+        await portfolio_manager.monitor_open_trades(clob_client=trading_engine.client)

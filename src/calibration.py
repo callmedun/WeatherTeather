@@ -175,11 +175,20 @@ class SelfCalibration:
                 current_value = shares * current_price
                 entry_value = shares * entry_price
                 pnl = current_value - entry_value
-                pnl_str = f"+{pnl:.2f}$" if pnl >= 0 else f"{pnl:.2f}$"
-                market_str = f"(сейчас: {current_price:.3f})"
+                pnl_str = f"{pnl:+.2f}$"
+                
+                predicted_prob = r.get('predicted_prob')
+                if predicted_prob:
+                    new_edge = (predicted_prob - current_price) * 100
+                    edge_str = f"| Edge: {new_edge:+.1f}%"
+                else:
+                    edge_str = ""
+                    
+                market_str = f"(рынок: {current_price:.3f} {edge_str})"
             else:
                 pnl_str = "+0.00$"
                 market_str = "(ошибка получения цены)"
+                edge_str = ""
                 
             # Extract Date and Temperature from question (fixed regex)
             q_text = r.get("question", "")
