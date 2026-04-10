@@ -251,7 +251,6 @@ class PortfolioManager:
                     unrealized_pnl_percent = (unrealized_pnl / trade.size_usd) * 100 if trade.size_usd > 0 else 0
                     
                     new_edge = (predicted_prob - exit_price) * 100
-                    new_ev = (predicted_prob * exit_price) + ((1 - predicted_prob) * -1) # Simplified EV
                     
                     # Fetch end date
                     hours_to_resolve = 999
@@ -272,7 +271,7 @@ class PortfolioManager:
                     exit_reason = None
                     sell_shares = shares
 
-                    if new_edge <= 3.0 or new_ev <= 0:
+                    if new_edge <= 3.0:
                         exit_reason = "take_profit"
                     elif new_edge >= 30.0:
                         exit_reason = "strong_take_profit"
