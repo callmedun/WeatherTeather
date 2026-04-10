@@ -273,7 +273,7 @@ class PortfolioManager:
 
                     if new_edge <= 3.0:
                         exit_reason = "take_profit"
-                    elif new_edge >= 30.0:
+                    elif unrealized_pnl_percent >= 30.0:
                         exit_reason = "strong_take_profit"
                         sell_shares = int(shares / 2) # Partial sell
                     elif new_edge <= -12.0 or unrealized_pnl_percent <= -8.0:
@@ -286,7 +286,7 @@ class PortfolioManager:
                         if sell_shares == 0:
                             continue # Too small to partial sell
 
-                        logger.info(f"[MONITOR 30min] {trade.city} {trade.outcome_name} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason.upper()} SELL {sell_shares} shares @ {exit_price} | PnL {unrealized_pnl:+.2f}$")
+                        logger.info(f"[MONITOR 30min] {trade.city} {trade.outcome_name} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason.upper()} SELL {sell_shares} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
                         
                         if not config.dry_run:
                             try:
@@ -298,7 +298,7 @@ class PortfolioManager:
                                 )
                                 resp = clob_client.create_and_post_order(order_args)
                                 if resp and resp.get("success"):
-                                    msg = f"🔔 <b>[MONITOR 30min EXIT]</b>\n<b>City:</b> {trade.city} {trade.outcome_name}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Old Edge:</b> {starting_edge:+.1f}%\n<b>New Edge:</b> {new_edge:+.1f}%\n<b>Shares:</b> {sell_shares}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                                    msg = f"🔔 <b>[MONITOR 30min EXIT]</b>\n<b>City:</b> {trade.city} {trade.outcome_name}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Shares:</b> {sell_shares}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                                     await send_telegram_message(msg)
                                     
                                     # Update DB
