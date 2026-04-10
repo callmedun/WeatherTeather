@@ -226,13 +226,11 @@ class PortfolioManager:
                         
                         best_bid = 0.0
                         if bids:
-                            first_bid = bids[0]
-                            best_bid = float(getattr(first_bid, 'price', first_bid.get('price', 0.0) if isinstance(first_bid, dict) else 0.0))
+                            best_bid = max([float(getattr(b, 'price', b.get('price', 0.0) if isinstance(b, dict) else 0.0)) for b in bids])
                             
                         best_ask = 1.0
                         if asks:
-                            first_ask = asks[0]
-                            best_ask = float(getattr(first_ask, 'price', first_ask.get('price', 1.0) if isinstance(first_ask, dict) else 1.0))
+                            best_ask = min([float(getattr(a, 'price', a.get('price', 1.0) if isinstance(a, dict) else 1.0)) for a in asks])
                     except Exception as e:
                         logger.warning(f"[MONITOR 30min] Orderbook fetch failed for {trade.token_id}: {e}")
                         continue
