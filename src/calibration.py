@@ -104,6 +104,27 @@ class SelfCalibration:
                 for r in records:
                     f.write(json.dumps(r) + "\n")
 
+    def mark_trade_closed(self, token_id: str, actual_outcome=None):
+        if not os.path.exists(self.filename):
+            return
+        records = []
+        updated = False
+        with open(self.filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip(): continue
+                r = json.loads(line)
+                # It's possible to partially sell, but for our simple tracking, if it hits TP/SL we mark it closed from active monitoring
+                if r.get("token_id") == token_id and r.get("status") == "open":
+                    r["status"] = "closed"
+                    if actual_outcome is not None:
+                        r["actual_outcome"] = actual_outcome
+                    updated = True
+                records.append(r)
+        if updated:
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                for r in records:
+                    f.write(json.dumps(r) + "\n")
+
     def calculate_calibration_factor(self, city: str) -> float:
         """
         Calculates the historical accuracy factor for a given city to adjust AI confidence natively.
@@ -149,6 +170,7 @@ class SelfCalibration:
         
         lines = ["📂 ОТКРЫТЫЕ СДЕЛКИ:\n"]
         count = 0
+        total_unrealized_pnl = 0.0
         
         # Read all records
         records = []
@@ -204,7 +226,10 @@ class SelfCalibration:
             lines.append(f"• {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']}\n"
                          f"  ↳ Вход: {shares:.1f} shares @ {entry_price:.3f}\n"
                          f"  ↳ PnL: {pnl_str} {market_str}\n")
-                         
+            if current_price is not None:
+                total_unrealized_pnl += pnl
+
+        lines.append(f"\n──────────────────\n📊 ОБЩИЙ РАСЧЕТНЫЙ PNL: {total_unrealized_pnl:+.2f}$")
         return "\n".join(lines)
         
     def get_open_trades(self) -> str:

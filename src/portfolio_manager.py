@@ -5,9 +5,11 @@ import json
 import httpx
 import traceback
 from src.utils import logger, send_telegram_message
+from src.calibration import calibration_engine
 from config.settings import config
 from py_clob_client.clob_types import OrderArgs
 import os
+import re
 
 Base = declarative_base()
 
@@ -285,8 +287,17 @@ class PortfolioManager:
                         sell_shares = int(sell_shares)
                         if sell_shares == 0:
                             continue # Too small to partial sell
+                            
+                        # Format Date/Temp
+                        q_text = mem.get("question", "")
+                        date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
+                        temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
+                        date_str = date_match.group(1) if date_match else "N/A"
+                        temp_str = temp_match.group(1).strip() if temp_match else "N/A"
+                        
+                        header_str = f"{trade.city} ({date_str}) [{temp_str}] {trade.outcome_name}"
 
-                        logger.info(f"[MONITOR 30min] {trade.city} {trade.outcome_name} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason.upper()} SELL {sell_shares} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
+                        logger.info(f"[MONITOR 30min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason.upper()} SELL {sell_shares} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
                         
                         if not config.dry_run:
                             try:
@@ -298,13 +309,14 @@ class PortfolioManager:
                                 )
                                 resp = clob_client.create_and_post_order(order_args)
                                 if resp and resp.get("success"):
-                                    msg = f"🔔 <b>[MONITOR 30min EXIT]</b>\n<b>City:</b> {trade.city} {trade.outcome_name}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Shares:</b> {sell_shares}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                                    msg = f"🔔 <b>[MONITOR 30min EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Shares:</b> {sell_shares}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                                     await send_telegram_message(msg)
                                     
                                     # Update DB
                                     if sell_shares >= int(shares):
                                         trade.status = "SOLD"
                                         trade.resolved_at = datetime.utcnow()
+                                        calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None)
                                     else:
                                         # Reduce size
                                         trade.size_usd -= (sell_shares * trade.entry_price)
@@ -317,11 +329,12 @@ class PortfolioManager:
                                 traceback.print_exc()
                         else:
                             # Dry run logging
-                            msg = f"🔔 <b>[DRY_RUN EXIT]</b>\n<b>City:</b> {trade.city} {trade.outcome_name}\n<b>Reason:</b> {exit_reason.upper()}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                            msg = f"🔔 <b>[DRY_RUN EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Shares:</b> {sell_shares}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                             await send_telegram_message(msg)
                             if sell_shares >= int(shares):
                                 trade.status = "SOLD"
                                 trade.resolved_at = datetime.utcnow()
+                                calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None)
                             session.commit()
 
         except Exception as e:
