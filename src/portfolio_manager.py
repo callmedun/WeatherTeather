@@ -217,10 +217,18 @@ class PortfolioManager:
                     # Fetch live orderbook to compute spread and best bid
                     try:
                         ob = clob_client.get_order_book(trade.token_id)
-                        bids = ob.get("bids", [])
-                        asks = ob.get("asks", [])
-                        best_bid = float(bids[0]["price"]) if bids else 0.0
-                        best_ask = float(asks[0]["price"]) if asks else 1.0
+                        bids = getattr(ob, "bids", [])
+                        asks = getattr(ob, "asks", [])
+                        
+                        best_bid = 0.0
+                        if bids:
+                            first_bid = bids[0]
+                            best_bid = float(getattr(first_bid, 'price', first_bid.get('price', 0.0) if isinstance(first_bid, dict) else 0.0))
+                            
+                        best_ask = 1.0
+                        if asks:
+                            first_ask = asks[0]
+                            best_ask = float(getattr(first_ask, 'price', first_ask.get('price', 1.0) if isinstance(first_ask, dict) else 1.0))
                     except Exception as e:
                         logger.warning(f"[MONITOR 30min] Orderbook fetch failed for {trade.token_id}: {e}")
                         continue
