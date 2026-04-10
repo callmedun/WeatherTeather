@@ -53,18 +53,18 @@ class Settings(BaseSettings):
         "Atlanta": "KATL",
         "Madrid": "LEMD",
         "Singapore": "WSSS",
-        "Mexico City": "MMMX",
-        "New York": "KJFK",
-        "Berlin": "EDDB",
-        "Paris": "LFPG",
-        "Tokyo": "RJTT",
-        "Chicago": "KORD",
-        "Los Angeles": "KLAX",
-        "Toronto": "CYYZ",
-        "Sydney": "YSSY",
-        "Dubai": "OMDB",
-        "Mumbai": "VABB",
-        "Sao Paulo": "SBGR"
+        # "Mexico City": "MMMX",
+        # "New York": "KJFK",
+        # "Berlin": "EDDB",
+        # "Paris": "LFPG",
+        # "Tokyo": "RJTT",
+        # "Chicago": "KORD",
+        # "Los Angeles": "KLAX",
+        # "Toronto": "CYYZ",
+        # "Sydney": "YSSY",
+        # "Dubai": "OMDB",
+        # "Mumbai": "VABB",
+        # "Sao Paulo": "SBGR"
     }
 
     model_config = SettingsConfigDict(

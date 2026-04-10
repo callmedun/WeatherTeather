@@ -211,6 +211,10 @@ class PortfolioManager:
                         logger.debug(f"[MONITOR 30min] Skipping {trade.city} - no predicted_prob in memory.")
                         continue
                         
+                    bought_outcome = mem.get('bought_outcome', '').lower()
+                    if bought_outcome == 'no':
+                        predicted_prob = 1.0 - predicted_prob
+                        
                     # Calculate true starting edge manually in case it wasn't saved in json
                     starting_edge = (predicted_prob - trade.entry_price) * 100 
 

@@ -178,7 +178,10 @@ class SelfCalibration:
                 pnl_str = f"{pnl:+.2f}$"
                 
                 predicted_prob = r.get('predicted_prob')
-                if predicted_prob:
+                bought_outcome = r.get('bought_outcome', '').lower()
+                if predicted_prob is not None:
+                    if bought_outcome == 'no':
+                        predicted_prob = 1.0 - predicted_prob
                     new_edge = (predicted_prob - current_price) * 100
                     edge_str = f"| Edge: {new_edge:+.1f}%"
                 else:
