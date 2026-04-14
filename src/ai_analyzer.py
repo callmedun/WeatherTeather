@@ -22,6 +22,8 @@ class AIAnalyzer:
             
         self.current_client_idx = 0
         self.lock = asyncio.Lock() 
+        self.global_lock = asyncio.Lock()
+        self.last_global_call = 0.0
         self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
         
         logger.info(f"[AI] Initialized with {len(self.clients)} API keys.")
