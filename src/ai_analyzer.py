@@ -33,8 +33,8 @@ class AIAnalyzer:
             except Exception as diag_e:
                 logger.warning(f"[AI] Diagnostic failed: {diag_e}")
 
-        # Use ONLY gemini-3.1-flash-lite-preview as requested by user.
-        self.fallback_models = ["gemini-3.1-flash-lite-preview"]
+        # Use ONLY gemma-4-31b-it as requested by user.
+        self.fallback_models = ["gemma-4-31b-it"]
             
         # Provide fallback if GEMINI.md isn't located
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
