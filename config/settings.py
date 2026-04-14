@@ -1,76 +1,55 @@
 import os
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import load_dotenv
+from pydantic import Field
+from pydantic_settings import BaseSettings
 from typing import Dict
 
+load_dotenv()
+
 class Settings(BaseSettings):
-    # Polymarket Config
-    polymarket_private_key: str = ""
-    funder_address: str = ""
-    chain_id: int = 137
+    # API Config
+    clob_api_key: str = ""
+    clob_api_secret: str = ""
+    clob_api_passphrase: str = ""
+    poly_private_key: str = ""
     
     # AI Config
     gemini_api_keys_str: str = "" # Comma separated list of keys
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.1-flash-lite-preview"
     
     # Notifications
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    telegram_menu_enabled: bool = True
     
-    # Trading Config
-    scan_days_ahead: int = 2
-    scan_interval_hours: int = 1
-    max_total_exposure: float = 0.20
-    max_city_exposure: float = 0.05
-    default_trade_size: float = 500.0
+    # Trading Params
     dry_run: bool = True
+    max_trade_size_usd: float = 20.0
+    scan_interval_hours: int = 1
+    scan_days_ahead: int = 2
+    resolution_check_interval_minutes: int = 15
     
-    # Polymarket Order Constraints
-    min_trade_usd: float = 2.0
-    min_shares: int = 1
-    max_decimals_amount: int = 2
-    
-    # Quantitative parameters
-    kelly_fraction: float = 0.35
+    # Kelly & EV Thresholds
+    kelly_fraction: float = 0.1
+    # EV thresholds per city (default + specific overrides)
     ev_threshold: Dict[str, float] = {
         "default": 0.08,
-        "London": 0.10,
-        "EGLL": 0.10
+        "London": 0.12 # Example override
     }
     
-    # Self-Calibration Module
-    calibration_min_trades: int = 30
-    resolution_check_interval_minutes: int = 60
-
-    # Dictionary of supported cities to their ICAO codes
-    # This allows mapping the text "Highest temperature in [CITY]" to METAR data.
+    # City-ICAO Mapping for Weather
     city_icao_mapping: Dict[str, str] = {
-        "Shanghai": "ZSPD", # PVG / ZSPD
-        "Seoul": "RKSI",
         "London": "EGLL",
-        "Miami": "KMIA",
+        "Seoul": "RKSS",
+        "Chicago": "KORD",
         "Dallas": "KDFW",
         "Atlanta": "KATL",
-        "Madrid": "LEMD",
-        "Singapore": "WSSS",
-        # "Mexico City": "MMMX",
-        # "New York": "KJFK",
-        # "Berlin": "EDDB",
-        # "Paris": "LFPG",
-        # "Tokyo": "RJTT",
-        # "Chicago": "KORD",
-        # "Los Angeles": "KLAX",
-        # "Toronto": "CYYZ",
-        # "Sydney": "YSSY",
-        # "Dubai": "OMDB",
-        # "Mumbai": "VABB",
-        # "Sao Paulo": "SBGR"
+        "Tokyo": "RJTT",
+        "Shanghai": "ZSSS",
+        "Singapore": "WSSS"
     }
 
-    model_config = SettingsConfigDict(
-        env_file=".env", 
-        env_file_encoding="utf-8", 
-        extra="ignore"
-    )
+    class Config:
+        env_file = ".env"
+        extra = "ignore"
 
 config = Settings()
