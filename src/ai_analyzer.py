@@ -24,6 +24,8 @@ class AIAnalyzer:
         self.current_client_idx = 0
         self.consecutive_failures = 0 # Circuit breaker counter
         self.lock = asyncio.Lock() # Lock for concurrent key selection
+        self.global_lock = asyncio.Lock() # Lock for global staggering
+        self.last_global_call = 0.0
         self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
         
         # Diagnostic: List available models for key 0 on boot
@@ -132,6 +134,15 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                     if wait_needed > 0:
                         await asyncio.sleep(wait_needed)
                     
+                    # --- NEW: Global Staggered Step (Prevent 500 bursts) ---
+                    # Ensure at least 0.5s between ANY two API calls across the bot
+                    async with self.global_lock:
+                        now_g = time.time()
+                        wait_global = 0.5 - (now_g - self.last_global_call)
+                        if wait_global > 0:
+                            await asyncio.sleep(wait_global)
+                        self.last_global_call = time.time()
+                    
                     try:
                         # Execute generation using modern Async client OUTSIDE the lock
                         response = await client.aio.models.generate_content(
@@ -149,10 +160,11 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                         break 
                     except Exception as api_err:
                         err_msg = str(api_err)
-                        if "429" in err_msg or "503" in err_msg or "quota" in err_msg.lower():
-                            wait_time = (attempt + 1) * 2
-                            logger.warning(f"[AI] Error ({model_name}) on key {idx}: {err_msg[:60]}. Retrying next...")
-                            await asyncio.sleep(0.5) # Quick skip to next key
+                        if "429" in err_msg or "503" in err_msg or "quota" in err_msg.lower() or "500" in err_msg:
+                            # Penalty: Mark this key as used + 10s in the future
+                            meta["last_used"] = time.time() + 10.0
+                            logger.warning(f"[AI] Error ({model_name}) on key {idx}: {err_msg[:60]}. Penalty 10s applied.")
+                            await asyncio.sleep(0.2) # Quick skip to next key
                         elif "404" in err_msg or "not found" in err_msg.lower():
                             logger.warning(f"[AI] Model {model_name} NOT FOUND (404). Skipping to next model.")
                             break # Go to next model in fallback_models
