@@ -49,18 +49,18 @@ class BotScheduler:
             # 3. Process cities one-by-one to stabilize load
             logger.info(f"Processing {len(config.city_icao_mapping)} potential cities...")
             
-            semaphore = asyncio.Semaphore(max(1, len(ai_analyzer.clients) * 2))
-            
             for city, icao in config.city_icao_mapping.items():
                 city_markets = [m for m in markets if m["city"] == city]
                 if not city_markets:
                     continue
                 
-                logger.info(f"[{city}] Analyzing {len(city_markets)} markets for this city...")
+                logger.info(f"[{city}] Analyzing {len(city_markets)} markets sequentially...")
                 
-                # Analyze markets for THIS city in parallel
-                tasks = [self.analyze_market_task(m, weather_data_map, semaphore) for m in city_markets]
-                results = await asyncio.gather(*tasks)
+                # Analyze markets for THIS city ONE BY ONE to ensure 100% stability
+                results = []
+                for m in city_markets:
+                    res = await self.analyze_market_task(m, weather_data_map)
+                    results.append(res)
                 
                 # Filter valid signals
                 signals_list = [r for r in results if r is not None]
@@ -113,26 +113,25 @@ class BotScheduler:
             import traceback
             traceback.print_exc()
 
-    async def analyze_market_task(self, market, weather_data_map, semaphore) -> Optional[dict]:
-        async with semaphore:
-            icao = market["icao_code"]
-            city = market["city"]
+    async def analyze_market_task(self, market, weather_data_map) -> Optional[dict]:
+        icao = market["icao_code"]
+        city = market["city"]
+        
+        w_data = weather_data_map.get(icao)
+        if not w_data or (not w_data["metar"] and not w_data["taf"]):
+            w_data = weather_fetcher.get_weather_for_icao(icao)
+        if not w_data or (not w_data["metar"] and not w_data["taf"]):
+            return None
             
-            w_data = weather_data_map.get(icao)
-            if not w_data or (not w_data["metar"] and not w_data["taf"]):
-                w_data = weather_fetcher.get_weather_for_icao(icao)
-            if not w_data or (not w_data["metar"] and not w_data["taf"]):
-                return None
-                
-            # Pre-filter outcomes
-            market["outcomes"] = [o for o in market.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
-            if not market["outcomes"]:
-                return None
+        # Pre-filter outcomes (Tightened to 0.05-0.95 for higher edge and stability)
+        market["outcomes"] = [o for o in market.get("outcomes", []) if 0.05 <= o["current_price"] <= 0.95]
+        if not market["outcomes"]:
+            return None
 
-            analysis = await ai_analyzer.analyze_market(market, w_data)
-            if analysis:
-                analysis["city"] = city
-            return analysis
+        analysis = await ai_analyzer.analyze_market(market, w_data)
+        if analysis:
+            analysis["city"] = city
+        return analysis
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here
