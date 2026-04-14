@@ -26,6 +26,11 @@ class TradePosition(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
 
+class RiskSetting(Base):
+    __tablename__ = 'risk_settings'
+    key = Column(String, primary_key=True)
+    value = Column(Float)
+
 class PortfolioManager:
     def __init__(self):
         db_dir = "data"
@@ -33,6 +38,9 @@ class PortfolioManager:
         self.engine = create_engine(f"sqlite:///{db_dir}/portfolio.db")
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
+        
+        # Initialize default settings if not exists
+        self.init_risk_settings()
         
         self.assumed_bankroll = 10000.0 
         
@@ -169,6 +177,50 @@ class PortfolioManager:
             
         return True
 
+    def init_risk_settings(self):
+        session = self.Session()
+        try:
+            defaults = {
+                "tp_edge": 3.0,          # Take Profit Edge (3%)
+                "strong_tp_pnl": 30.0,   # Strong PnL TP (30%)
+                "sl_edge": -12.0,        # Stop Loss Edge (-12%)
+                "sl_pnl": -8.0,          # Stop Loss PnL (-8%)
+                "time_exit_h": 6.0       # Time-based exit (6 hours)
+            }
+            for k, v in defaults.items():
+                existing = session.query(RiskSetting).filter_by(key=k).first()
+                if not existing:
+                    session.add(RiskSetting(key=k, value=v))
+            session.commit()
+        except Exception as e:
+            logger.error(f"Failed to init risk settings: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
+    def get_risk_setting(self, key: str, default: float) -> float:
+        session = self.Session()
+        try:
+            res = session.query(RiskSetting).filter_by(key=key).first()
+            return res.value if res else default
+        finally:
+            session.close()
+
+    def set_risk_setting(self, key: str, value: float):
+        session = self.Session()
+        try:
+            res = session.query(RiskSetting).filter_by(key=key).first()
+            if res:
+                res.value = value
+            else:
+                session.add(RiskSetting(key=key, value=value))
+            session.commit()
+        except Exception as e:
+            logger.error(f"Failed to update risk setting {key}: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
         return True
 
     async def monitor_open_trades(self, clob_client) -> None:
@@ -269,17 +321,24 @@ class PortfolioManager:
                     except:
                         pass
 
+                    # Fetch current thresholds from DB
+                    tp_edge_limit = self.get_risk_setting("tp_edge", 3.0)
+                    strong_tp_limit = self.get_risk_setting("strong_tp_pnl", 30.0)
+                    sl_edge_limit = self.get_risk_setting("sl_edge", -12.0)
+                    sl_pnl_limit = self.get_risk_setting("sl_pnl", -8.0)
+                    time_exit_limit = self.get_risk_setting("time_exit_h", 6.0)
+
                     exit_reason = None
                     sell_shares = shares
 
-                    if new_edge <= 3.0:
+                    if new_edge <= tp_edge_limit:
                         exit_reason = "take_profit"
-                    elif unrealized_pnl_percent >= 30.0:
+                    elif unrealized_pnl_percent >= strong_tp_limit:
                         exit_reason = "strong_take_profit"
                         sell_shares = int(shares / 2) # Partial sell
-                    elif new_edge <= -12.0 or unrealized_pnl_percent <= -8.0:
+                    elif new_edge <= sl_edge_limit or unrealized_pnl_percent <= sl_pnl_limit:
                         exit_reason = "stop_loss"
-                    elif hours_to_resolve < 6.0:
+                    elif hours_to_resolve < time_exit_limit:
                         exit_reason = "time_based"
 
                     if exit_reason and sell_shares > 0:
@@ -316,7 +375,12 @@ class PortfolioManager:
                                         trade.status = "SOLD"
                                         trade.resolved_at = datetime.utcnow()
                                         from src.calibration import calibration_engine
-                                        calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None)
+                                        calibration_engine.mark_trade_closed(
+                                            trade.token_id, 
+                                            actual_outcome=None, 
+                                            exit_price=exit_price, 
+                                            realized_pnl=unrealized_pnl
+                                        )
                                     else:
                                         # Reduce size
                                         trade.size_usd -= (sell_shares * trade.entry_price)
@@ -335,7 +399,12 @@ class PortfolioManager:
                                         trade.status = "SOLD"
                                         trade.resolved_at = datetime.utcnow()
                                         from src.calibration import calibration_engine
-                                        calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None)
+                                        calibration_engine.mark_trade_closed(
+                                            trade.token_id, 
+                                            actual_outcome=None, 
+                                            exit_price=exit_price, 
+                                            realized_pnl=unrealized_pnl
+                                        )
                             session.commit()
 
         except Exception as e:

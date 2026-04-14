@@ -104,7 +104,7 @@ class SelfCalibration:
                 for r in records:
                     f.write(json.dumps(r) + "\n")
 
-    def mark_trade_closed(self, token_id: str, actual_outcome=None):
+    def mark_trade_closed(self, token_id: str, actual_outcome=None, exit_price=None, realized_pnl=None):
         if not os.path.exists(self.filename):
             return
         records = []
@@ -113,11 +113,14 @@ class SelfCalibration:
             for line in f:
                 if not line.strip(): continue
                 r = json.loads(line)
-                # It's possible to partially sell, but for our simple tracking, if it hits TP/SL we mark it closed from active monitoring
                 if r.get("token_id") == token_id and r.get("status") == "open":
                     r["status"] = "closed"
                     if actual_outcome is not None:
                         r["actual_outcome"] = actual_outcome
+                    if exit_price is not None:
+                        r["exit_price"] = exit_price
+                    if realized_pnl is not None:
+                        r["realized_pnl"] = realized_pnl
                     updated = True
                 records.append(r)
         if updated:
@@ -247,17 +250,51 @@ class SelfCalibration:
                 if not line.strip(): continue
                 r = json.loads(line)
                 if r.get("status") == "closed":
-                    outcome_icon = "✅" if r.get("actual_outcome") else "❌"
-                    size = r.get('size_usd', 0)
-                    price = r.get('price_at_buy', 1.0)
-                    pnl = ((size / price) - size) if r.get("actual_outcome") else -size
+                    outcome_icon = "✅" if r.get("actual_outcome") is True else "❌"
+                    # If it was an early exit, it might not have actual_outcome set but has realized_pnl
+                    if r.get("realized_pnl") is not None:
+                        pnl = r["realized_pnl"]
+                    else:
+                        size = r.get('size_usd', 0)
+                        price = r.get('price_at_buy', 1.0)
+                        pnl = ((size / price) - size) if r.get("actual_outcome") is True else -size
                     
-                    lines.append(f"{outcome_icon} {r['city']} | {r['bought_outcome']} | PnL: {pnl:+.2f}$\n"
-                                 f"  ↳ Вход: ${size:.2f} @ {price:.3f} | AI: {r['predicted_prob']:.2f}")
+                    # Extract Date and Temperature (re-use logic)
+                    q_text = r.get("question", "")
+                    date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
+                    temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
+                    date_str = date_match.group(1) if date_match else "N/A"
+                    temp_str = temp_match.group(1).strip() if temp_match else "N/A"
+
+                    lines.append(f"{outcome_icon} {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']} | PnL: {pnl:+.2f}$\n"
+                                 f"  ↳ Вход: ${r.get('size_usd',0):.2f} @ {r.get('price_at_buy',0):.3f} | AI: {r.get('predicted_prob',0):.2f}")
         
         if not lines:
             return "📜 История пуста."
         return "📜 ПОСЛЕДНИЕ ЗАКРЫТЫЕ СДЕЛКИ (до 15):\n\n" + "\n\n".join(lines[-15:])
+
+    def get_risk_summary(self) -> str:
+        """Returns a string summary of current risk thresholds."""
+        tp_edge = portfolio_manager.get_risk_setting("tp_edge", 3.0)
+        strong_tp_pnl = portfolio_manager.get_risk_setting("strong_tp_pnl", 30.0)
+        sl_edge = portfolio_manager.get_risk_setting("sl_edge", -12.0)
+        sl_pnl = portfolio_manager.get_risk_setting("sl_pnl", -8.0)
+        time_exit = portfolio_manager.get_risk_setting("time_exit_h", 6.0)
+
+        return (
+            "⚙️ ТЕКУЩИЕ НАСТРОЙКИ РИСКА:\n\n"
+            f"🎯 Take Profit (Edge): <= {tp_edge}%\n"
+            f"🚀 Strong TP (PnL): >= {strong_tp_pnl}%\n"
+            f"📉 Stop Loss (Edge): <= {sl_edge}%\n"
+            f"🚫 Stop Loss (PnL): <= {sl_pnl}%\n"
+            f"⏳ Time Exit: < {time_exit} hours\n\n"
+            "Используйте команды:\n"
+            "/tp [value] - изменить порог TP Edge\n"
+            "/stp [value] - изменить порог Strong TP PnL\n"
+            "/sle [value] - изменить порог SL Edge\n"
+            "/slp [value] - изменить порог SL PnL\n"
+            "/time [value] - изменить время выхода (часы)"
+        )
 
     def get_portfolio_stats(self, clob_client=None) -> str:
         """Returns general portfolio math based on historical records."""
