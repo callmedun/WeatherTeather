@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from typing import Dict, Any, Optional
 from google import genai
 from google.genai import types
@@ -19,6 +20,8 @@ class AIAnalyzer:
             self.clients.append(genai.Client(api_key=config.gemini_api_key))
             
         self.current_client_idx = 0
+        self.consecutive_failures = 0 # Circuit breaker counter
+        self.fallback_models = [config.gemini_model, "gemini-1.5-flash"]
             
         # Provide fallback if GEMINI.md isn't located
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
@@ -78,29 +81,47 @@ Ensemble consensus (51+ members): {ensemble_summary}
 
 Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probability using the weighted formula. Apply correction only where justified. Output ONLY the JSON."""
 
-            max_retries = len(self.clients)
-            for attempt in range(max_retries):
-                client = self.clients[self.current_client_idx]
-                try:
-                    # Execute generation using modern Async client
-                    response = await client.aio.models.generate_content(
-                        model=config.gemini_model,
-                        contents=content,
-                        config=self.generation_config
-                    )
-                    break # Success
-                except Exception as api_err:
-                    err_msg = str(api_err)
-                    if "429" in err_msg or "503" in err_msg or "quota" in err_msg.lower():
-                        logger.warning(f"Gemini API limit/error on key idx {self.current_client_idx}: {err_msg[:50]}")
-                        self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
-                        if attempt == max_retries - 1:
-                            logger.error("All Gemini API keys exhausted or rate limited.")
+            max_keys = len(self.clients)
+            success = False
+            response = None
+            
+            # Circuit breaker check: if we had 5 consecutive total failures previously, fail fast
+            if self.consecutive_failures >= 5:
+                # logger.warning("[AI] Circuit breaker ACTIVE. Skipping market analysis.")
+                return None
+
+            for model_name in self.fallback_models:
+                if success: break
+                
+                for attempt in range(max_keys):
+                    client = self.clients[self.current_client_idx]
+                    try:
+                        # Execute generation using modern Async client
+                        response = await client.aio.models.generate_content(
+                            model=model_name,
+                            contents=content,
+                            config=self.generation_config
+                        )
+                        success = True
+                        self.consecutive_failures = 0 # Reset on any success
+                        break 
+                    except Exception as api_err:
+                        err_msg = str(api_err)
+                        if "429" in err_msg or "503" in err_msg or "quota" in err_msg.lower():
+                            wait_time = (attempt + 1) * 2
+                            logger.warning(f"Gemini API error ({model_name}) on key {self.current_client_idx}: {err_msg[:60]}. Waiting {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                            
+                            self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
+                        else:
+                            logger.error(f"Unrecoverable Gemini API error: {api_err}")
                             return None
-                        logger.info(f"Switching to next Gemini API key (idx {self.current_client_idx}) and retrying...")
-                    else:
-                        logger.error(f"Unrecoverable Gemini API error: {api_err}")
-                        return None
+            
+            if not success:
+                self.consecutive_failures += 1
+                if self.consecutive_failures >= 5:
+                    logger.error("!!! CIRCUIT BREAKER TRIGGERED !!! AI Service is unstable. Stopping analysis.")
+                return None
             
             # Strict JSON parsing according to the new GEMINI.md schema
             try:

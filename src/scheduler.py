@@ -18,6 +18,7 @@ class BotScheduler:
 
     async def scan_and_trade(self):
         logger.info("=== Starting Full Scan & Trade Cycle ===")
+        ai_analyzer.consecutive_failures = 0 # Reset circuit breaker at start of cycle
         try:
             # 1. Fetch active weather markets
             markets = await self.discoverer.get_active_weather_markets()
@@ -78,6 +79,12 @@ class BotScheduler:
                 logger.debug(f"   -> Valid constraints. Sending to AI...")
                 analysis = await ai_analyzer.analyze_market(market, w_data)
                 
+                # Check if API is totally down (circuit breaker)
+                if ai_analyzer.consecutive_failures >= 5:
+                    logger.error("Stopping current scan cycle early: Gemini AI Service is unavailable.")
+                    await send_telegram_message("🔴 <b>Gemini API Down:</b> Сканирование прервано из-за ошибок 503/429. Повторю через час.")
+                    break
+
                 if analysis:
                     logger.success(
                         f"Trade signal! {city} -> BUY '{analysis.get('outcome_slug')}' "
