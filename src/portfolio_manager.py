@@ -9,6 +9,7 @@ from config.settings import config
 from py_clob_client.clob_types import OrderArgs
 import os
 import re
+import asyncio
 
 Base = declarative_base()
 
@@ -71,12 +72,13 @@ class PortfolioManager:
                     except: continue
             elif isinstance(res, list):
                 for item in res:
-                    tid = item.get("token_id")
-                    p = item.get("price")
-                    if tid and p:
-                        val = float(p)
-                        self._price_cache[tid] = {'price': val, 'time': now}
-                        results[tid] = val
+                    if isinstance(item, dict):
+                        tid = item.get("token_id")
+                        p = item.get("price")
+                        if tid and p:
+                            val = float(p)
+                            self._price_cache[tid] = {'price': val, 'time': now}
+                            results[tid] = val
             return results
         except Exception as e:
             logger.warning(f"[Portfolio] Batch price fetch failed: {e}")
@@ -104,7 +106,7 @@ class PortfolioManager:
                 return res_dict[token_id]
                 
             # 3. Last resort fallback
-            result = clob_client.get_price(token_id)
+            result = clob_client.get_price(token_id, side="BUY")
             if isinstance(result, (int, float, str)):
                 val = float(result)
                 self._price_cache[token_id] = {'price': val, 'time': now}
