@@ -51,38 +51,56 @@ class PortfolioManager:
         self.cache_ttl = 30 # seconds
 
     def get_current_prices(self, clob_client, token_ids: list[str]) -> dict[str, float]:
-        """Пакетное получение цен для списка токенов (POST /prices). Экономит лимиты."""
+        """Пакетное получение цен (POST /prices). С защитой от ошибок SDK."""
         if not clob_client or not token_ids:
             return {}
             
         try:
-            # Use the bulk prices endpoint
+            # Try SDK first (but with a format that bypasses attribute errors if possible)
             res = clob_client.get_prices(token_ids)
-            now = datetime.now().timestamp()
-            
-            # Map results to cache
-            # Response is usually a dict {token_id: price} or a list of dicts
-            results = {}
-            if isinstance(res, dict):
-                for tid, p in res.items():
-                    try:
-                        val = float(p)
-                        self._price_cache[tid] = {'price': val, 'time': now}
-                        results[tid] = val
-                    except: continue
-            elif isinstance(res, list):
-                for item in res:
-                    if isinstance(item, dict):
-                        tid = item.get("token_id")
-                        p = item.get("price")
-                        if tid and p:
+            return self._parse_prices_response(res)
+        except Exception as e:
+            if "'str' object has no attribute 'token_id'" in str(e):
+                # Fallback to direct HTTP if SDK is bugged
+                try:
+                    host = "https://clob.polymarket.com" if config.chain_id == 137 else "https://clob.amoy.polymarket.com"
+                    url = f"{host}/prices"
+                    with httpx.Client() as client:
+                        r = client.post(url, json={"token_ids": token_ids}, timeout=10.0)
+                        if r.status_code == 200:
+                            return self._parse_prices_response(r.json())
+                except Exception as http_e:
+                    logger.warning(f"[Portfolio] Direct HTTP Price fetch failed: {http_e}")
+            else:
+                logger.warning(f"[Portfolio] SDK get_prices failed: {e}")
+            return {}
+
+    def _parse_prices_response(self, res) -> dict[str, float]:
+        """Helper to parse various response formats from Polymarket prices endpoint."""
+        now = datetime.now().timestamp()
+        results = {}
+        
+        if isinstance(res, dict):
+            # Format: {"token_id": "price", ...}
+            for tid, p in res.items():
+                try:
+                    val = float(p)
+                    self._price_cache[tid] = {'price': val, 'time': now}
+                    results[tid] = val
+                except: continue
+        elif isinstance(res, list):
+            # Format: [{"token_id": "...", "price": "..."}, ...] or ["price1", "price2"]?
+            for item in res:
+                if isinstance(item, dict):
+                    tid = item.get("token_id")
+                    p = item.get("price")
+                    if tid and p:
+                        try:
                             val = float(p)
                             self._price_cache[tid] = {'price': val, 'time': now}
                             results[tid] = val
-            return results
-        except Exception as e:
-            logger.warning(f"[Portfolio] Batch price fetch failed: {e}")
-            return {}
+                        except: continue
+        return results
 
     def get_current_price(self, clob_client, token_id: str) -> float | None:
         """Получает текущую цену токена, используя кэш или одиночный запрос."""
