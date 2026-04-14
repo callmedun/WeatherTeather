@@ -46,25 +46,43 @@ class BotScheduler:
                 except Exception as e:
                     logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
 
-            # 3. Process cities one-by-one to stabilize load, but parallelize markets within each city
-            logger.info(f"Processing {len(config.city_icao_mapping)} cities in parallel-market mode...")
+            # 3. Process cities one-by-one to stabilize load, but parallelize markets with Worker-Key pinning
+            logger.info(f"Processing {len(config.city_icao_mapping)} cities in Worker-Lanes mode...")
             
-            # Use a semaphore to ensure we don't overwhelm the API (1 task per key is very safe)
-            semaphore = asyncio.Semaphore(len(ai_analyzer.clients))
+            num_keys = len(ai_analyzer.clients)
             
             for city, icao in config.city_icao_mapping.items():
                 city_markets = [m for m in markets if m["city"] == city]
                 if not city_markets:
                     continue
                 
-                logger.info(f"[{city}] Analyzing {len(city_markets)} markets in parallel...")
+                logger.info(f"[{city}] Filling task queue for {len(city_markets)} markets. Using {num_keys} workers...")
                 
-                # Analyze markets for THIS city in parallel using the semaphore
-                tasks = [self.analyze_market_task(m, weather_data_map, semaphore) for m in city_markets]
-                results = await asyncio.gather(*tasks)
+                # 1. Create Task Queue for this city
+                queue = asyncio.Queue()
+                for m in city_markets:
+                    queue.put_now_nowait(m)
+                
+                # 2. Results Collector
+                results_list = []
+                
+                # 3. Spawn Workers (One per key, with staggered start)
+                workers = []
+                for i in range(min(num_keys, len(city_markets))):
+                    # Stagger the start of each worker to create a distributed rhythm
+                    await asyncio.sleep(0.7) 
+                    worker = asyncio.create_task(self.worker_task(queue, results_list, i, weather_data_map))
+                    workers.append(worker)
+                
+                # 4. Wait for all markets in this city to be processed
+                await queue.join()
+                
+                # 5. Stop Workers
+                for w in workers:
+                    w.cancel()
                 
                 # Filter valid signals
-                signals_list = [r for r in results if r is not None]
+                signals_list = [r for r in results_list if r is not None]
                 if not signals_list:
                     continue
 
@@ -115,26 +133,32 @@ class BotScheduler:
             import traceback
             traceback.print_exc()
 
-    async def analyze_market_task(self, market, weather_data_map, semaphore) -> Optional[dict]:
-        async with semaphore:
-            icao = market["icao_code"]
-            city = market["city"]
-            
-            w_data = weather_data_map.get(icao)
-            if not w_data or (not w_data["metar"] and not w_data["taf"]):
-                w_data = weather_fetcher.get_weather_for_icao(icao)
-            if not w_data or (not w_data["metar"] and not w_data["taf"]):
-                return None
+    async def worker_task(self, queue: asyncio.Queue, results: list, key_idx: int, weather_data_map: dict):
+        """Worker that exclusively uses one API key (key_idx) to process markets from a queue"""
+        while True:
+            market = await queue.get()
+            try:
+                icao = market["icao_code"]
+                city = market["city"]
                 
-            # Pre-filter outcomes (Original 0.02-0.98 range restored)
-            market["outcomes"] = [o for o in market.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
-            if not market["outcomes"]:
-                return None
-
-            analysis = await ai_analyzer.analyze_market(market, w_data)
-            if analysis:
-                analysis["city"] = city
-            return analysis
+                w_data = weather_data_map.get(icao)
+                if not w_data or (not w_data["metar"] and not w_data["taf"]):
+                    w_data = weather_fetcher.get_weather_for_icao(icao)
+                
+                if w_data and (w_data["metar"] or w_data["taf"]):
+                    # Pre-filter outcomes
+                    market["outcomes"] = [o for o in market.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
+                    
+                    if market["outcomes"]:
+                        # USE PINNED KEY
+                        analysis = await ai_analyzer.analyze_with_key(market, w_data, key_idx)
+                        if analysis:
+                            analysis["city"] = city
+                            results.append(analysis)
+            except Exception as e:
+                logger.warning(f"Worker {key_idx} error: {e}")
+            finally:
+                queue.task_done()
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here

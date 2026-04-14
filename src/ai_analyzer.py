@@ -165,6 +165,67 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                             meta["last_used"] = time.time() + 10.0
                             logger.warning(f"[AI] Error ({model_name}) on key {idx}: {err_msg[:60]}. Penalty 10s applied.")
                             await asyncio.sleep(0.2) # Quick skip to next key
+
+    async def analyze_with_key(self, market: Dict, weather_data: Dict, key_idx: int) -> Optional[Dict]:
+        """
+        Special version for Worker-based analysis. Only uses the SPECIFIED client index.
+        This provides perfect isolation and rhythm for each key.
+        """
+        if key_idx >= len(self.clients):
+            return await self.analyze_market(market, weather_data) # Fallback
+            
+        client = self.clients[key_idx]
+        meta = self.client_metadata[key_idx]
+        base_delay = 4.5
+        
+        for model_name in self.fallback_models:
+            for attempt in range(2): # 2 attempts per model for this specific key
+                # 1. Local Cooldown
+                now = time.time()
+                elapsed = now - meta["last_used"]
+                if elapsed < base_delay:
+                    await asyncio.sleep(base_delay - elapsed)
+                
+                # 2. Global Stagger (Extra Safety)
+                async with self.global_lock:
+                    now_g = time.time()
+                    wait_global = 0.5 - (now_g - self.last_global_call)
+                    if wait_global > 0:
+                        await asyncio.sleep(wait_global)
+                    self.last_global_call = time.time()
+                
+                meta["last_used"] = time.time()
+                
+                try:
+                    prompt = self._build_prompt(market, weather_data)
+                    response = await client.aio.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.7
+                        )
+                    )
+                    
+                    if not response or not response.text:
+                        continue
+                        
+                    analysis = self._parse_response(response.text)
+                    if analysis:
+                        meta["use_count"] += 1
+                        return analysis
+                        
+                except Exception as api_err:
+                    err_msg = str(api_err)
+                    if "429" in err_msg or "500" in err_msg or "quota" in err_msg.lower():
+                        meta["last_used"] = time.time() + 10.0 # Penalty
+                        logger.warning(f"[AI] Worker Key {key_idx} Error: {err_msg[:60]}. Penalty applied.")
+                        await asyncio.sleep(2.0) # Longer breather for this worker
+                    else:
+                        logger.error(f"[AI] Worker Key {key_idx} Fatal Error: {err_msg[:60]}")
+                        break # Next model
+                        
+        return None
                         elif "404" in err_msg or "not found" in err_msg.lower():
                             logger.warning(f"[AI] Model {model_name} NOT FOUND (404). Skipping to next model.")
                             break # Go to next model in fallback_models
