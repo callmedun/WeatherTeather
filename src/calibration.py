@@ -275,10 +275,10 @@ class SelfCalibration:
 
     def get_risk_summary(self) -> str:
         """Returns a string summary of current risk thresholds."""
-        tp_edge = portfolio_manager.get_risk_setting("tp_edge", 3.0)
+        tp_edge = portfolio_manager.get_risk_setting("tp_edge", 10.0)
         strong_tp_pnl = portfolio_manager.get_risk_setting("strong_tp_pnl", 30.0)
         sl_edge = portfolio_manager.get_risk_setting("sl_edge", -12.0)
-        sl_pnl = portfolio_manager.get_risk_setting("sl_pnl", -8.0)
+        sl_pnl = portfolio_manager.get_risk_setting("sl_pnl", -15.0)
         time_exit = portfolio_manager.get_risk_setting("time_exit_h", 6.0)
 
         return (

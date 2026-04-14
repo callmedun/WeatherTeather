@@ -181,10 +181,10 @@ class PortfolioManager:
         session = self.Session()
         try:
             defaults = {
-                "tp_edge": 3.0,          # Take Profit Edge (3%)
+                "tp_edge": 10.0,         # Take Profit Edge (10%)
                 "strong_tp_pnl": 30.0,   # Strong PnL TP (30%)
                 "sl_edge": -12.0,        # Stop Loss Edge (-12%)
-                "sl_pnl": -8.0,          # Stop Loss PnL (-8%)
+                "sl_pnl": -15.0,         # Stop Loss PnL (-15%)
                 "time_exit_h": 6.0       # Time-based exit (6 hours)
             }
             for k, v in defaults.items():
@@ -323,10 +323,10 @@ class PortfolioManager:
                         pass
 
                     # Fetch current thresholds from DB
-                    tp_edge_limit = self.get_risk_setting("tp_edge", 3.0)
+                    tp_edge_limit = self.get_risk_setting("tp_edge", 10.0)
                     strong_tp_limit = self.get_risk_setting("strong_tp_pnl", 30.0)
                     sl_edge_limit = self.get_risk_setting("sl_edge", -12.0)
-                    sl_pnl_limit = self.get_risk_setting("sl_pnl", -8.0)
+                    sl_pnl_limit = self.get_risk_setting("sl_pnl", -15.0)
                     time_exit_limit = self.get_risk_setting("time_exit_h", 6.0)
 
                     exit_reason = None
