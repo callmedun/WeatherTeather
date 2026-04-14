@@ -227,17 +227,18 @@ class PortfolioManager:
         """Проверяет ТОЛЬКО открытые позиции каждые 30 минут и решает закрывать или нет.
         НЕ сканирует новые рынки!"""
         if not clob_client:
-            logger.warning("[MONITOR 30min] clob_client is None. Skipping.")
+            logger.warning("[MONITOR 10min] clob_client is None. Skipping.")
             return
 
         session = self.Session()
         try:
             open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
             if not open_trades:
-                logger.info("[MONITOR 30min] No open trades to monitor.")
+                logger.info("[MONITOR 10min] No open trades to monitor.")
                 return
             
-            logger.info(f"[MONITOR 30min] Started checking {len(open_trades)} open trades...")
+            logger.info(f"[MONITOR 10min] Started checking {len(open_trades)} open trades...")
+            trades_sold = 0
             
             # Load AI prediction memory
             ai_memory = {}
@@ -261,7 +262,7 @@ class PortfolioManager:
                     predicted_prob = mem.get('predicted_prob', None)
                     
                     if predicted_prob is None:
-                        logger.debug(f"[MONITOR 30min] Skipping {trade.city} - no predicted_prob in memory.")
+                        logger.debug(f"[MONITOR 10min] Skipping {trade.city} - no predicted_prob in memory.")
                         continue
                         
                     bought_outcome = mem.get('bought_outcome', '').lower()
@@ -285,7 +286,7 @@ class PortfolioManager:
                         if asks:
                             best_ask = min([float(getattr(a, 'price', a.get('price', 1.0) if isinstance(a, dict) else 1.0)) for a in asks])
                     except Exception as e:
-                        logger.warning(f"[MONITOR 30min] Orderbook fetch failed for {trade.token_id}: {e}")
+                        logger.warning(f"[MONITOR 10min] Orderbook fetch failed for {trade.token_id}: {e}")
                         continue
 
                     if best_bid == 0.0:
@@ -293,7 +294,7 @@ class PortfolioManager:
                         
                     spread = best_ask - best_bid
                     if spread > 0.06:
-                        logger.debug(f"[MONITOR 30min] Spread too high ({spread*100:.1f}%) for {trade.city}. Skipping.")
+                        logger.debug(f"[MONITOR 10min] Spread too high ({spread*100:.1f}%) for {trade.city}. Skipping.")
                         continue
 
                     # Current best_bid is our exit price
@@ -355,7 +356,7 @@ class PortfolioManager:
                         
                         header_str = f"{trade.city} ({date_str}) [{temp_str}] {trade.outcome_name}"
 
-                        logger.info(f"[MONITOR 30min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason.upper()} SELL {sell_shares} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
+                        logger.info(f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason.upper()} SELL {sell_shares} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
                         
                         if not config.dry_run:
                             try:
@@ -386,10 +387,11 @@ class PortfolioManager:
                                         trade.size_usd -= (sell_shares * trade.entry_price)
                                         
                                     session.commit()
+                                    trades_sold += 1
                                 else:
-                                    logger.error(f"[MONITOR 30min] Sell order failed: {resp}")
+                                    logger.error(f"[MONITOR 10min] Sell order failed: {resp}")
                             except Exception as e:
-                                logger.error(f"[MONITOR 30min] Execution exception: {e}")
+                                logger.error(f"[MONITOR 10min] Execution exception: {e}")
                                 traceback.print_exc()
                         else:
                             # Dry run logging
@@ -406,9 +408,15 @@ class PortfolioManager:
                                             realized_pnl=unrealized_pnl
                                         )
                             session.commit()
+                            trades_sold += 1
+                
+                if trades_sold == 0:
+                    logger.info(f"[MONITOR 10min] Finished check of {len(open_trades)} trades. No positions reached exit thresholds.")
+                else:
+                    logger.info(f"[MONITOR 10min] Finished check. Sold {trades_sold} positions.")
 
         except Exception as e:
-            logger.error(f"[MONITOR 30min] Fatal error: {e}")
+            logger.error(f"[MONITOR 10min] Fatal error: {e}")
             traceback.print_exc()
         finally:
             session.close()
