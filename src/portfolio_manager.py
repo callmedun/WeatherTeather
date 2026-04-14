@@ -49,65 +49,73 @@ class PortfolioManager:
         self._price_cache = {}
         self.cache_ttl = 30 # seconds
 
-    def get_current_price(self, clob_client, token_id: str) -> float | None:
-        """Получает текущую midpoint цену токена"""
-        if not token_id:
-            print(f"[ERROR] Некорректный token_id: {token_id}")
-            return None
+    def get_current_prices(self, clob_client, token_ids: list[str]) -> dict[str, float]:
+        """Пакетное получение цен для списка токенов (POST /prices). Экономит лимиты."""
+        if not clob_client or not token_ids:
+            return {}
             
-        print(f"[DEBUG] Запрос цены для token: {str(token_id)[:20]}...")
-        if clob_client is None:
-            print("[WARN] clob_client is None")
+        try:
+            # Use the bulk prices endpoint
+            res = clob_client.get_prices(token_ids)
+            now = datetime.now().timestamp()
+            
+            # Map results to cache
+            # Response is usually a dict {token_id: price} or a list of dicts
+            results = {}
+            if isinstance(res, dict):
+                for tid, p in res.items():
+                    try:
+                        val = float(p)
+                        self._price_cache[tid] = {'price': val, 'time': now}
+                        results[tid] = val
+                    except: continue
+            elif isinstance(res, list):
+                for item in res:
+                    tid = item.get("token_id")
+                    p = item.get("price")
+                    if tid and p:
+                        val = float(p)
+                        self._price_cache[tid] = {'price': val, 'time': now}
+                        results[tid] = val
+            return results
+        except Exception as e:
+            logger.warning(f"[Portfolio] Batch price fetch failed: {e}")
+            return {}
+
+    def get_current_price(self, clob_client, token_id: str) -> float | None:
+        """Получает текущую цену токена, используя кэш или одиночный запрос."""
+        if not token_id:
             return None
             
         now = datetime.now().timestamp()
         
-        # Check cache
+        # 1. Check Cache
         if token_id in self._price_cache:
             if now - self._price_cache[token_id]['time'] < self.cache_ttl:
-                print(f"[DEBUG] Cached price = {self._price_cache[token_id]['price']}")
                 return self._price_cache[token_id]['price']
                 
+        if clob_client is None:
+            return None
+            
         try:
-            # Основной способ (цена моментальной продажи = Best Bid, сторона покупателей "BUY")
-            result = clob_client.get_price(token_id, side="BUY")
-            
-            price_val = None
-            if isinstance(result, dict):
-                if "price" in result:
-                    price_val = float(result["price"])
-                else:
-                    print(f"[WARN] dict без ключа price: {result}")
-            elif isinstance(result, (int, float, str)) and result is not None:
-                price_val = float(result)
-            else:
-                print(f"[WARN] Неизвестный тип ответа get_price: {type(result)}")
+            # 2. Try Batch (even for one) as it's more stable
+            res_dict = self.get_current_prices(clob_client, [token_id])
+            if token_id in res_dict:
+                return res_dict[token_id]
                 
-            if price_val is not None:
-                self._price_cache[token_id] = {'price': price_val, 'time': now}
-                print(f"[SUCCESS] Instant sell price (Best Bid) = {price_val}")
-                return price_val
-            
-            # Fallback на midpoint, если стакан пуст с одной стороны
-            print("[WARN] Нет покупателей (Best Bid = None), пробуем Midpoint")
-            mid_result = clob_client.get_midpoint(token_id)
-            if isinstance(mid_result, dict):
-                if "price" in mid_result:
-                    val = float(mid_result["price"])
-                    self._price_cache[token_id] = {'price': val, 'time': now}
-                    print(f"[SUCCESS] Fallback Midpoint = {val}")
-                    return val
-                elif "mid" in mid_result:
-                    val = float(mid_result["mid"])
-                    self._price_cache[token_id] = {'price': val, 'time': now}
-                    print(f"[SUCCESS] Fallback Midpoint = {val}")
-                    return val
-                    
-            print("[WARN] Книга ордеров полностью пуста (None)")
+            # 3. Last resort fallback
+            result = clob_client.get_price(token_id)
+            if isinstance(result, (int, float, str)):
+                val = float(result)
+                self._price_cache[token_id] = {'price': val, 'time': now}
+                return val
+            elif isinstance(result, dict) and "price" in result:
+                val = float(result["price"])
+                self._price_cache[token_id] = {'price': val, 'time': now}
+                return val
             return None
         except Exception as e:
-            logger.debug(f"[WARN] Не удалось получить цену для {token_id}: {e}")
-            print(f"[ERROR] get_current_price failed: {e}")
+            logger.debug(f"[WARN] Failed to get price for {token_id}: {e}")
             return None
 
     def record_trade(self, market_id: str, token_id: str, city: str, outcome: str, price: float, size: float, sentiment: str = "NEUTRAL"):
@@ -247,6 +255,11 @@ class PortfolioManager:
                 return
             
             logger.info(f"[MONITOR 10min] Started checking {len(open_trades)} open trades...")
+            
+            # --- NEW: Batch Sync Prices once to avoid 429 later ---
+            unique_tokens = list(set([t.token_id for t in open_trades if t.token_id]))
+            self.get_current_prices(clob_client, unique_tokens)
+            
             trades_sold = 0
             
             # Load AI prediction memory
@@ -293,6 +306,9 @@ class PortfolioManager:
                     except Exception as e:
                         logger.warning(f"[MONITOR 10min] Orderbook fetch failed for {trade.token_id}: {e}")
                         continue
+
+                    # Rate limit relief
+                    await asyncio.sleep(0.1)
 
                     if best_bid == 0.0:
                         continue # No liquidity to exit

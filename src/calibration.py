@@ -187,6 +187,10 @@ class SelfCalibration:
         if not records:
             return "📁 Нет активных сделок."
             
+        # --- NEW: Batch Sync Prices once for the menu ---
+        unique_tokens = list(set([r['token_id'] for r in records]))
+        portfolio_manager.get_current_prices(clob_client, unique_tokens)
+            
         for r in records:
             count += 1
             size = r.get('size_usd', 0)
