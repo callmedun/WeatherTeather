@@ -133,12 +133,12 @@ class BotScheduler:
             replace_existing=True
         )
         
-        # Schedule the 30-minute active trade monitor
-        logger.info("[SCHEDULER] monitor_open_trades started every 30 minutes")
+        # Schedule the 10-minute active trade monitor
+        logger.info("[SCHEDULER] monitor_open_trades started every 10 minutes")
         self.scheduler.add_job(
             self.monitor_open_trades_task,
             "interval",
-            minutes=30,
+            minutes=10,
             id="monitor_open_trades",
             replace_existing=True
         )
@@ -175,5 +175,5 @@ class BotScheduler:
 
     async def monitor_open_trades_task(self):
         from src.portfolio_manager import portfolio_manager
-        logger.info("[SCHEDULER] Running scheduled 30-minute open trades monitor...")
+        logger.info("[SCHEDULER] Running scheduled 10-minute open trades monitor...")
         await portfolio_manager.monitor_open_trades(clob_client=trading_engine.client)
