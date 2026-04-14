@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     clob_api_key: str = ""
     clob_api_secret: str = ""
     clob_api_passphrase: str = ""
-    polymarket_private_key: str = "" # Fixed from poly_private_key
-    funder_address: str = "" # Added back
-    chain_id: int = 137 # Added back
+    polymarket_private_key: str = ""
+    funder_address: str = ""
+    chain_id: int = 137
     
     # AI Config
     gemini_api_keys_str: str = "" # Comma separated list of keys
@@ -22,13 +22,20 @@ class Settings(BaseSettings):
     # Notifications
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_enabled: bool = True
     
     # Trading Params
     dry_run: bool = True
     max_trade_size_usd: float = 20.0
+    min_trade_usd: float = 5.0 # Required by TradingEngine
+    min_shares: int = 1 # Required by TradingEngine
+    max_decimals_amount: int = 2 # Required by TradingEngine
     scan_interval_hours: int = 1
     scan_days_ahead: int = 2
     resolution_check_interval_minutes: int = 15
+    
+    # Calibration
+    calibration_min_trades: int = 3 # Required by SelfCalibration
     
     # Kelly & EV Thresholds
     kelly_fraction: float = 0.1
