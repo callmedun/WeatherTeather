@@ -35,13 +35,13 @@ class TradingEngine:
     async def execute_trade(self, analysis: dict):
         city = analysis.get("city", "Unknown")
         target_token = analysis.get("token_id")
-        price = analysis.get("current_price")
+        price = analysis.get("market_price")
         sentiment = analysis.get("sentiment", "NEUTRAL")
         
         logger.info(f"Preparing trade for {city} | Sentiment: {sentiment} | Outcome: {analysis.get('outcome_slug')} | Expected Price: {price}")
 
         # Match Fractional Kelly sizing from AI Analysis
-        kelly_frac = analysis.get("kelly_frac", 0.0)
+        kelly_frac = analysis.get("kelly", 0.0)
         
         # Target payout scales linearly with fractional Kelly. 
         target_payout = 100.0 * kelly_frac
