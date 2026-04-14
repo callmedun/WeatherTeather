@@ -8,6 +8,7 @@ from src.market_discovery import MarketDiscoverer
 from src.weather_data import weather_fetcher
 from src.ai_analyzer import ai_analyzer
 from src.trading_engine import trading_engine
+from src.portfolio_manager import portfolio_manager
 from src.calibration import calibration_engine
 from config.settings import config
 from datetime import datetime
