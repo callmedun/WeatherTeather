@@ -1,6 +1,7 @@
 import json
 import os
 import asyncio
+import time
 from typing import Dict, Any, Optional
 from google import genai
 from google.genai import types
@@ -21,6 +22,7 @@ class AIAnalyzer:
             
         self.current_client_idx = 0
         self.consecutive_failures = 0 # Circuit breaker counter
+        self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
         # Primary is gemini_model, fallback to flash-8b as it's often more available
         self.fallback_models = [config.gemini_model, "gemini-1.5-flash-8b", "gemini-1.5-pro"]
             
@@ -95,7 +97,21 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                 if success: break
                 
                 for attempt in range(max_keys):
-                    client = self.clients[self.current_client_idx]
+                    # Rotate client index for every market to balance load (Round Robin)
+                    idx = self.current_client_idx
+                    self.current_client_idx = (self.current_client_idx + 1) % max_keys
+                    
+                    client = self.clients[idx]
+                    meta = self.client_metadata[idx]
+                    
+                    # Throttle: Ensure at least 4.1s between uses of THIS specific key
+                    now = time.time()
+                    elapsed = now - meta["last_used"]
+                    if elapsed < 4.1:
+                        wait_needed = 4.1 - elapsed
+                        # logger.debug(f"[AI] Key {idx} throttling ({wait_needed:.1f}s delay)...")
+                        await asyncio.sleep(wait_needed)
+
                     try:
                         # Execute generation using modern Async client
                         response = await client.aio.models.generate_content(
@@ -105,14 +121,20 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                         )
                         success = True
                         self.consecutive_failures = 0 # Reset on any success
+                        meta["last_used"] = time.time()
+                        meta["use_count"] += 1
+                        
+                        # Warning if near 1500 daily limit (approximate)
+                        if meta["use_count"] > 1400:
+                            logger.warning(f"⚠️ [AI] Key {idx} reaching daily quote limit ({meta['use_count']}/1500)")
+                        
                         break 
                     except Exception as api_err:
                         err_msg = str(api_err)
                         if "429" in err_msg or "503" in err_msg or "quota" in err_msg.lower():
                             wait_time = (attempt + 1) * 2
-                            logger.warning(f"[AI] Error ({model_name}) on key {self.current_client_idx}: {err_msg[:60]}. Waiting {wait_time}s...")
-                            await asyncio.sleep(wait_time)
-                            self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
+                            logger.warning(f"[AI] Error ({model_name}) on key {idx}: {err_msg[:60]}. Retrying next...")
+                            await asyncio.sleep(0.5) # Quick skip to next key
                         elif "404" in err_msg or "not found" in err_msg.lower():
                             logger.warning(f"[AI] Model {model_name} NOT FOUND (404). Skipping to next model.")
                             break # Go to next model in fallback_models

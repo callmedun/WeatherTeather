@@ -47,9 +47,15 @@ class BotScheduler:
                     logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
 
             # 3. Analyze each market
+            traded_cities_this_cycle = set()
             for market in markets:
                 icao = market["icao_code"]
                 city = market["city"]
+                
+                # OPTIMIZATION: If we already found a trade for this city in this hour, save API keys 
+                if city in traded_cities_this_cycle:
+                    continue
+                    
                 w_data = weather_data_map.get(icao)
                 
                 # Check cache fallback if empty
@@ -94,9 +100,10 @@ class BotScheduler:
                     # Merge city info for the trading engine
                     analysis["city"] = city
                     await trading_engine.execute_trade(analysis)
+                    traded_cities_this_cycle.add(city)
                 
-                # Optimized speed for flash-lite limit (15 RPM = ~4s delay)
-                await asyncio.sleep(4)
+                # Reduced base sleep because AIAnalyzer now handles per-key 4s throttle
+                await asyncio.sleep(1)
                     
             logger.info("=== Scan & Trade Cycle Completed ===")
             
