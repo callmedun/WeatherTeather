@@ -46,8 +46,8 @@ class BotScheduler:
                 except Exception as e:
                     logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
 
-            # 3. Analyze all markets in parallel
-            semaphore = asyncio.Semaphore(max(1, len(ai_analyzer.clients) * 8))
+            # 3. Analyze all markets in parallel (Limited concurrency to prevent 429/500 bursts)
+            semaphore = asyncio.Semaphore(max(1, len(ai_analyzer.clients) * 2))
             tasks = [self.analyze_market_task(m, weather_data_map, semaphore) for m in markets]
             
             logger.info(f"Analyzing {len(tasks)} markets in parallel...")

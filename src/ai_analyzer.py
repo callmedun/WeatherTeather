@@ -2,6 +2,7 @@ import json
 import os
 import asyncio
 import time
+import random
 from typing import Dict, Any, Optional
 from google import genai
 from google.genai import types
@@ -109,6 +110,7 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                 for attempt in range(max_keys):
                     # Rotate client index for every market to balance load
                     # LOCKED SECTION: select key and handle per-key cooldown
+                    wait_needed = 0
                     async with self.lock:
                         idx = self.current_client_idx
                         self.current_client_idx = (self.current_client_idx + 1) % max_keys
@@ -116,15 +118,19 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                         client = self.clients[idx]
                         meta = self.client_metadata[idx]
                         
-                        # Throttle: Ensure at least 4.1s between uses of THIS specific key
+                        # Throttle: Ensure at least 4.5s + jitter between uses of THIS specific key
+                        # Increasing to 4.5s for safer RPM compliance and adding 0-0.5s jitter
+                        base_delay = 4.5 + random.uniform(0, 0.5)
                         now = time.time()
                         elapsed = now - meta["last_used"]
-                        if elapsed < 4.1:
-                            wait_needed = 4.1 - elapsed
-                            await asyncio.sleep(wait_needed)
+                        if elapsed < base_delay:
+                            wait_needed = base_delay - elapsed
                         
-                        # Update last_used BEFORE releasing lock to "claim" the 4s slot
-                        meta["last_used"] = time.time()
+                        # Update last_used BEFORE releasing lock to "claim" the slot (including wait)
+                        meta["last_used"] = now + wait_needed
+                    
+                    if wait_needed > 0:
+                        await asyncio.sleep(wait_needed)
                     
                     try:
                         # Execute generation using modern Async client OUTSIDE the lock
