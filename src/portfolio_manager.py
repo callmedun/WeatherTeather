@@ -23,6 +23,7 @@ class TradePosition(Base):
     entry_price = Column(Float)
     size_usd = Column(Float)
     status = Column(String) # OPEN, RESOLVED, SOLD
+    sentiment = Column(String, nullable=True) # BULLISH, BEARISH, NEUTRAL
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
 
@@ -109,7 +110,7 @@ class PortfolioManager:
             print(f"[ERROR] get_current_price failed: {e}")
             return None
 
-    def record_trade(self, market_id: str, token_id: str, city: str, outcome: str, price: float, size: float):
+    def record_trade(self, market_id: str, token_id: str, city: str, outcome: str, price: float, size: float, sentiment: str = "NEUTRAL"):
         session = self.Session()
         try:
             trade = TradePosition(
@@ -119,7 +120,8 @@ class PortfolioManager:
                 outcome_name=outcome,
                 entry_price=price,
                 size_usd=size,
-                status="OPEN"
+                status="OPEN",
+                sentiment=sentiment
             )
             session.add(trade)
             session.commit()
@@ -135,6 +137,13 @@ class PortfolioManager:
         try:
             open_trades = session.query(TradePosition).filter_by(city=city, status="OPEN").all()
             return sum(t.size_usd for t in open_trades)
+        finally:
+            session.close()
+
+    def get_open_trades_for_city(self, city: str) -> list:
+        session = self.Session()
+        try:
+            return session.query(TradePosition).filter_by(city=city, status="OPEN").all()
         finally:
             session.close()
             

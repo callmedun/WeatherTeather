@@ -21,8 +21,11 @@ JSON OUTPUT SCHEMA:
 {
   "true_probability": float between 0.0 and 1.0,
   "confidence": integer 0-100,
+  "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL",
   "reasoning": "short 2-3 sentence explanation of weighting and correction",
   "edge": float (true_probability - market_price_for_yes),
   "recommended_action": "BUY_YES" | "BUY_NO" | "SKIP" | "HOLD",
   "correction_applied": boolean
 }
+
+*Note on Sentiment: Use BULLISH if your analysis suggests the temperature will exceed the market expectation/threshold; BEARISH if it will be lower than the market expectation/threshold; NEUTRAL if unsure.*

@@ -36,8 +36,9 @@ class TradingEngine:
         city = analysis.get("city", "Unknown")
         target_token = analysis.get("token_id")
         price = analysis.get("current_price")
+        sentiment = analysis.get("sentiment", "NEUTRAL")
         
-        logger.info(f"Preparing trade for {city} | Outcome: {analysis.get('outcome_slug')} | Expected Price: {price}")
+        logger.info(f"Preparing trade for {city} | Sentiment: {sentiment} | Outcome: {analysis.get('outcome_slug')} | Expected Price: {price}")
 
         # Match Fractional Kelly sizing from AI Analysis
         kelly_frac = analysis.get("kelly_frac", 0.0)
@@ -81,7 +82,8 @@ class TradingEngine:
                 city=city,
                 outcome=analysis.get("outcome_name"),
                 price=price,
-                size=intended_size
+                size=intended_size,
+                sentiment=sentiment
             )
             calibration_engine.save_prediction(
                 market_id=analysis["market_id"],
@@ -132,7 +134,8 @@ class TradingEngine:
                     city=city,
                     outcome=analysis.get("outcome_name"),
                     price=price,
-                    size=intended_size
+                    size=intended_size,
+                    sentiment=sentiment
                 )
                 calibration_engine.save_prediction(
                     market_id=analysis["market_id"],

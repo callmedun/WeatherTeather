@@ -173,6 +173,7 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
             edge_raw = analysis_data.get("edge", 0.0)
             confidence = analysis_data.get("confidence", 0)
             rec = analysis_data.get("recommended_action", "SKIP")
+            sentiment = analysis_data.get("sentiment", "NEUTRAL")
             
             target_outcome_name = "Yes" if rec == "BUY_YES" else "No"
             
@@ -228,6 +229,7 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                         "calibration_factor": calib_factor,
                         "true_probability": calibrated_prob_yes,
                         "confidence": confidence,
+                        "sentiment": sentiment,
                         "recommendation": rec
                     }
                     
@@ -235,8 +237,8 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
             
         except Exception as e:
             logger.error(f"Error during AI multi-source analysis for {market_info.get('event_title')}: {e}")
-            return None
-            logger.error(f"Error during AI analysis for {market_info.get('event_title')}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 ai_analyzer = AIAnalyzer()
