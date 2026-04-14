@@ -61,7 +61,7 @@ class BotScheduler:
                 # 1. Create Task Queue for this city
                 queue = asyncio.Queue()
                 for m in city_markets:
-                    queue.put_now_nowait(m)
+                    queue.put_nowait(m)
                 
                 # 2. Results Collector
                 results_list = []
