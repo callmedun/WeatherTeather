@@ -50,142 +50,164 @@ class AIAnalyzer:
             ]
         )
 
-    async def analyze_market(self, market_info: Dict[str, Any], weather_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Simple, strictly sequential analysis to prevent 429/500 errors."""
-        if not self.clients:
-            logger.warning("Gemini API key(s) missing, skipping analysis.")
-            return None
+    async def analyze_city_batch(self, city: str, markets: list[dict], weather_data: dict) -> list[dict]:
+        """Analyzes all markets for one city in a single API call (Batch Mode)."""
+        if not self.clients or not markets:
+            return []
             
         try:
-            # 1. Prepare Data
-            market_price_yes = 0.0
-            for out in market_info["outcomes"]:
-                if "yes" in out["name"].lower():
-                    market_price_yes = out["current_price"]
-                    break
-            
+            # 1. Prepare Weather Data
             metar_raw = json.dumps(weather_data.get("metar", [])[:5])
             taf_raw = json.dumps(weather_data.get("taf", [])[:2])
-            
-            ecmwf_summary = weather_data.get("ecmwf_summary", "N/A")
-            gfs_hrrr_summary = weather_data.get("gfs_hrrr_summary", "N/A")
-            ensemble_summary = weather_data.get("ensemble_summary", "N/A")
+            ecmwf = weather_data.get("ecmwf_summary", "N/A")
+            gfs_hrrr = weather_data.get("gfs_hrrr_summary", "N/A")
+            ensemble = weather_data.get("ensemble_summary", "N/A")
 
-            content = f"""Market question: {market_info.get('question', '')}
-Current Price for YES: {market_price_yes}
-METAR: {metar_raw}
-TAF: {taf_raw}
-ECMWF: {ecmwf_summary}
-GFS/HRRR: {gfs_hrrr_summary}
-Ensemble: {ensemble_summary}"""
+            # 2. Build Markets List for Prompt
+            markets_context = []
+            for i, m in enumerate(markets):
+                yes_price = 0.0
+                for out in m.get("outcomes", []):
+                    if "yes" in out["name"].lower():
+                        yes_price = out["current_price"]
+                        break
+                markets_context.append(f"({i+1}) Market: {m.get('question')} | YES Price: {yes_price} | ID: {m['market_id']}")
+
+            markets_str = "\n".join(markets_context)
+            
+            content = f"""CITY: {city}
+WEATHER DATA:
+- METAR: {metar_raw}
+- TAF: {taf_raw}
+- ECMWF Forecast: {ecmwf}
+- GFS/HRRR Forecast: {gfs_hrrr}
+- Ensemble Mean: {ensemble}
+
+ACTIVE MARKETS TO ANALYZE (Total: {len(markets)}):
+{markets_str}
+
+TASK:
+Analyze all {len(markets)} markets above. 
+Crucially: treat these as a unified probability distribution for {city}. For example, if you assign high probability to one temperature bucket, the others should be lower to maintain a realistic total distribution.
+
+RESPONSE FORMAT:
+Return a JSON array of objects. DO NOT follow the single-object schema from your system instructions. Instead, return a LIST of objects, where each object has this schema:
+{{
+  "market_id": "STRICTLY COPY FROM INPUT",
+  "true_probability": float (0.0 - 1.0),
+  "confidence": integer (0-100),
+  "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL",
+  "reasoning": "...",
+  "recommended_action": "BUY_YES" | "BUY_NO" | "SKIP",
+  "correction_applied": boolean
+}}
+"""
 
             max_keys = len(self.clients)
             success = False
             response = None
             
-            # 2. Sequential Key Selection (with Retry Loop if all keys fail)
-            for retry_attempt in range(3):
+            # 3. Request logic with retries
+            for retry in range(3):
                 if success: break
+                if retry > 0:
+                    await asyncio.sleep(4.0)
                 
-                if retry_attempt > 0:
-                    wait_retry = 3.0 + (retry_attempt * 2.0)
-                    logger.info(f"All keys failed with 429/500. Retrying analysis in {wait_retry}s (Attempt {retry_attempt+1}/3)...")
-                    await asyncio.sleep(wait_retry)
+                for attempt in range(max_keys):
+                    async with self.lock:
+                        idx = self.current_client_idx
+                        self.current_client_idx = (self.current_client_idx + 1) % max_keys
+                        client = self.clients[idx]
+                        meta = self.client_metadata[idx]
+                        
+                        # Throttle
+                        base_delay = 4.1
+                        now = time.time()
+                        if now - meta["last_used"] < base_delay:
+                            await asyncio.sleep(base_delay - (now - meta["last_used"]))
+                        meta["last_used"] = time.time()
 
-                for model_name in self.fallback_models:
-                    if success: break
-                    
-                    for attempt in range(max_keys):
-                        # Rotate key and check cooldown
-                        async with self.lock:
-                            idx = self.current_client_idx
-                            self.current_client_idx = (self.current_client_idx + 1) % max_keys
-                            
-                            client = self.clients[idx]
-                            meta = self.client_metadata[idx]
-                            
-                            # Throttle
-                            base_delay = 4.1 # Target 15 RPM per key
-                            now = time.time()
-                            elapsed = now - meta["last_used"]
-                            if elapsed < base_delay:
-                                await asyncio.sleep(base_delay - elapsed)
-                            
-                            meta["last_used"] = time.time()
-                        
-                        # --- GLOBAL STAGGER (Safety across all keys) ---
-                        async with self.global_lock:
-                            now_g = time.time()
-                            wait_global = 0.5 - (now_g - self.last_global_call)
-                            if wait_global > 0:
-                                await asyncio.sleep(wait_global)
-                            self.last_global_call = time.time()
-                        
-                        try:
-                            response = await client.aio.models.generate_content(
-                                model=model_name,
-                                contents=content,
-                                config=self.generation_config
-                            )
-                            if response and response.text:
-                                success = True
-                                meta["use_count"] += 1
-                                break
-                        except Exception as api_err:
-                            err_msg = str(api_err)
-                            if "429" in err_msg or "500" in err_msg or "quota" in err_msg.lower():
-                                logger.warning(f"[AI] Key {idx} Error: {err_msg[:60]}. Skipping to next key.")
-                                meta["last_used"] = time.time() + 10.0 # Small lockout
-                            else:
-                                logger.error(f"[AI] Key {idx} Fatal: {err_msg[:60]}")
-                                break # Try next model if applicable
-            
+                    async with self.global_lock:
+                        now_g = time.time()
+                        if now_g - self.last_global_call < 0.5:
+                            await asyncio.sleep(0.5 - (now_g - self.last_global_call))
+                        self.last_global_call = time.time()
+
+                    try:
+                        response = await client.aio.models.generate_content(
+                            model=self.fallback_models[0],
+                            contents=content,
+                            config=self.generation_config
+                        )
+                        if response and response.text:
+                            success = True
+                            meta["use_count"] += 1
+                            break
+                    except Exception as e:
+                        if "429" in str(e) or "500" in str(e):
+                            logger.warning(f"[AI] Key {idx} Batch Error: {str(e)[:40]}. Trying next.")
+                            meta["last_used"] = time.time() + 10.0
+                        else:
+                            logger.error(f"[AI] Key {idx} Fatal: {e}")
+                            break
+
             if not success or not response:
-                return None
-            
-            # 3. Parse and Calculate
+                return []
+
+            # 4. Parse Batch Results
             try:
-                analysis_data = json.loads(response.text)
-            except json.JSONDecodeError:
-                logger.error(f"JSON Error: {response.text}")
-                return None
+                raw_results = json.loads(response.text)
+                if isinstance(raw_results, dict) and "predictions" in raw_results:
+                    raw_results = raw_results["predictions"] # Handle some prompt variants
+                if not isinstance(raw_results, list):
+                    logger.error(f"AI Batch error: Expected list, got {type(raw_results)}")
+                    return []
+            except:
+                logger.error(f"JSON Error in Batch response: {response.text[:200]}")
+                return []
 
-            logger.info(f"AI JSON Response: {json.dumps(analysis_data, ensure_ascii=False)}")
-            logger.info(f"AI Reasoning: {analysis_data.get('reasoning', 'N/A')}")
+            logger.info(f"[{city}] AI Batch analyzed {len(raw_results)} markets.")
+            
+            # 5. Process and Rank Signals
+            final_signals = []
+            calib_factor = calibration_engine.calculate_calibration_factor(city)
+            ev_threshold = config.ev_threshold.get(city, config.ev_threshold.get("default", 0.08))
 
-            rec = analysis_data.get("recommended_action", "SKIP")
-            sentiment = analysis_data.get("sentiment", "NEUTRAL")
-            confidence = analysis_data.get("confidence", 0)
-            target_outcome_name = "Yes" if rec == "BUY_YES" else "No"
-            
-            matched_out = None
-            for out in market_info["outcomes"]:
-                if out["name"].lower() == target_outcome_name.lower():
-                    matched_out = out
-                    break
-            
-            if matched_out:
+            # Helper for mapping AI result back to market dict
+            # AI is asked to return objects that match the market IDs or order.
+            for item in raw_results:
+                m_id = item.get("market_id")
+                # Find matching market config
+                m_config = next((m for m in markets if m["market_id"] == m_id), None)
+                if not m_config: continue
+
+                rec = item.get("recommended_action", "SKIP")
+                sentiment = item.get("sentiment", "NEUTRAL")
+                confidence = item.get("confidence", 0)
+                target_outcome_name = "Yes" if "YES" in rec.upper() else "No"
+
+                matched_out = next((o for o in m_config["outcomes"] if o["name"].lower() == target_outcome_name.lower()), None)
+                if not matched_out: continue
+
                 market_price = matched_out["current_price"]
-                city = market_info.get("city", "default")
-                calib_factor = calibration_engine.calculate_calibration_factor(city)
+                raw_prob = item.get("true_probability", 0.0)
                 
-                raw_prob_yes = analysis_data.get("true_probability", 0.0)
-                calibrated_prob_yes = min(0.99, max(0.01, raw_prob_yes * calib_factor))
-                
+                # Apply Calibration
+                calibrated_prob_yes = min(0.99, max(0.01, raw_prob * calib_factor))
                 p = calibrated_prob_yes if target_outcome_name == "Yes" else (1.0 - calibrated_prob_yes)
+                
+                # Math
+                edge_decimal = p - market_price
                 ev = (p * (1 - market_price)) - ((1 - p) * market_price)
                 
-                edge_decimal = p - market_price
                 odds = (1 - market_price) / market_price if market_price > 0 else 0
                 full_kelly = (edge_decimal / odds) if odds > 0 else 0
                 fractional_kelly = full_kelly * config.kelly_fraction if full_kelly > 0 else 0.0
-                
-                ev_threshold = config.ev_threshold.get(city, config.ev_threshold.get("default", 0.08))
-                
-                if ev > ev_threshold and fractional_kelly > 0 and confidence >= 82 and "BUY" in rec:
-                    return {
-                        "market_id": market_info["market_id"],
-                        "question": market_info.get("question", "Unknown"),
+
+                if ev > ev_threshold and fractional_kelly > 0 and confidence >= 82 and "BUY" in rec.upper():
+                    final_signals.append({
+                        "market_id": m_config["market_id"],
+                        "question": m_config.get("question", "Unknown"),
                         "token_id": matched_out["token_id"],
                         "outcome_name": matched_out["name"],
                         "outcome_slug": target_outcome_name,
@@ -197,11 +219,12 @@ Ensemble: {ensemble_summary}"""
                         "confidence": confidence,
                         "sentiment": sentiment,
                         "city": city
-                    }
-            return None
+                    })
+
+            return final_signals
             
         except Exception as e:
-            logger.error(f"Global AI Error: {e}")
-            return None
+            logger.error(f"Global AI Batch Error for {city}: {e}")
+            return []
 
 ai_analyzer = AIAnalyzer()
