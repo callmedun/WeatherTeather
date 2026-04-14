@@ -46,28 +46,29 @@ class BotScheduler:
                 except Exception as e:
                     logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
 
-            # 3. Process cities one-by-one to stabilize load
-            logger.info(f"Processing {len(config.city_icao_mapping)} potential cities...")
+            # 3. Process cities one-by-one to stabilize load, but parallelize markets within each city
+            logger.info(f"Processing {len(config.city_icao_mapping)} cities in parallel-market mode...")
+            
+            # Use a semaphore to ensure we don't overwhelm the API (1 task per key is very safe)
+            semaphore = asyncio.Semaphore(len(ai_analyzer.clients))
             
             for city, icao in config.city_icao_mapping.items():
                 city_markets = [m for m in markets if m["city"] == city]
                 if not city_markets:
                     continue
                 
-                logger.info(f"[{city}] Analyzing {len(city_markets)} markets sequentially...")
+                logger.info(f"[{city}] Analyzing {len(city_markets)} markets in parallel...")
                 
-                # Analyze markets for THIS city ONE BY ONE to ensure 100% stability
-                results = []
-                for m in city_markets:
-                    res = await self.analyze_market_task(m, weather_data_map)
-                    results.append(res)
+                # Analyze markets for THIS city in parallel using the semaphore
+                tasks = [self.analyze_market_task(m, weather_data_map, semaphore) for m in city_markets]
+                results = await asyncio.gather(*tasks)
                 
                 # Filter valid signals
                 signals_list = [r for r in results if r is not None]
                 if not signals_list:
                     continue
 
-                # Sort by EV descending
+                # Sort by EV descending (Best EV Mode)
                 signals_list.sort(key=lambda x: x["ev"], reverse=True)
                 
                 # Fetch currently open trades for this city
@@ -75,6 +76,7 @@ class BotScheduler:
                 open_sentiments = [t.sentiment for t in open_trades if t.sentiment]
                 open_tokens = [t.token_id for t in open_trades]
                 
+                # Multi-trade logic (up to 2 non-conflicting trades)
                 trades_to_execute = []
                 for sig in signals_list:
                     if len(open_trades) + len(trades_to_execute) >= 2:
@@ -113,25 +115,26 @@ class BotScheduler:
             import traceback
             traceback.print_exc()
 
-    async def analyze_market_task(self, market, weather_data_map) -> Optional[dict]:
-        icao = market["icao_code"]
-        city = market["city"]
-        
-        w_data = weather_data_map.get(icao)
-        if not w_data or (not w_data["metar"] and not w_data["taf"]):
-            w_data = weather_fetcher.get_weather_for_icao(icao)
-        if not w_data or (not w_data["metar"] and not w_data["taf"]):
-            return None
+    async def analyze_market_task(self, market, weather_data_map, semaphore) -> Optional[dict]:
+        async with semaphore:
+            icao = market["icao_code"]
+            city = market["city"]
             
-        # Pre-filter outcomes (Tightened to 0.05-0.95 for higher edge and stability)
-        market["outcomes"] = [o for o in market.get("outcomes", []) if 0.05 <= o["current_price"] <= 0.95]
-        if not market["outcomes"]:
-            return None
+            w_data = weather_data_map.get(icao)
+            if not w_data or (not w_data["metar"] and not w_data["taf"]):
+                w_data = weather_fetcher.get_weather_for_icao(icao)
+            if not w_data or (not w_data["metar"] and not w_data["taf"]):
+                return None
+                
+            # Pre-filter outcomes (Original 0.02-0.98 range restored)
+            market["outcomes"] = [o for o in market.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
+            if not market["outcomes"]:
+                return None
 
-        analysis = await ai_analyzer.analyze_market(market, w_data)
-        if analysis:
-            analysis["city"] = city
-        return analysis
+            analysis = await ai_analyzer.analyze_market(market, w_data)
+            if analysis:
+                analysis["city"] = city
+            return analysis
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here

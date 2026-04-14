@@ -59,14 +59,7 @@ class Settings(BaseSettings):
         "Atlanta": "KATL",
         "Tokyo": "RJTT",
         "Shanghai": "ZSSS",
-        "Singapore": "WSSS",
-        "New York": "KJFK",
-        "Los Angeles": "KLAX",
-        "Paris": "LFPG",
-        "Hong Kong": "VHHH",
-        "Phoenix": "KPHX",
-        "Sydney": "YSSY",
-        "Miami": "KMIA"
+        "Singapore": "WSSS"
     }
 
     class Config:
