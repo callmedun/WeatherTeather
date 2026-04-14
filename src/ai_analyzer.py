@@ -18,29 +18,18 @@ class AIAnalyzer:
             for key in keys:
                 self.clients.append(genai.Client(api_key=key))
         elif getattr(config, 'gemini_api_key', None):
-            # Legacy fallback
             self.clients.append(genai.Client(api_key=config.gemini_api_key))
             
         self.current_client_idx = 0
-        self.consecutive_failures = 0 # Circuit breaker counter
-        self.lock = asyncio.Lock() # Lock for concurrent key selection
-        self.global_lock = asyncio.Lock() # Lock for global staggering
+        self.consecutive_failures = 0 
+        self.lock = asyncio.Lock() 
+        self.global_lock = asyncio.Lock() 
         self.last_global_call = 0.0
         self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
-        
-        # Diagnostic: List available models for key 0 on boot
-        if self.clients:
-            try:
-                models = self.clients[0].models.list()
-                model_names = [m.name for m in models]
-                logger.info(f"[AI] Diagnostic: Available models for key 0: {model_names}")
-            except Exception as diag_e:
-                logger.warning(f"[AI] Diagnostic failed: {diag_e}")
 
         # Use ONLY gemma-4-31b-it as requested by user.
         self.fallback_models = ["gemma-4-31b-it"]
             
-        # Provide fallback if GEMINI.md isn't located
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
         try:
             with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "GEMINI.md"), "r", encoding="utf-8") as f:
@@ -48,8 +37,6 @@ class AIAnalyzer:
         except:
             pass
             
-        # Configure model config using the modern google-genai structured GenerateContentConfig
-        # We disable safety blocks just in case trading terms trip false positives
         self.generation_config = types.GenerateContentConfig(
             temperature=0.0,
             response_mime_type="application/json",
@@ -62,80 +49,63 @@ class AIAnalyzer:
             ]
         )
 
-    async def analyze_market(self, market_info: Dict[str, Any], weather_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def analyze_market(self, market_info: Dict[str, Any], weather_data: Dict[str, Any], forced_key_idx: Optional[int] = None) -> Optional[Dict[str, Any]]:
         if not self.clients:
             logger.warning("Gemini API key(s) missing, skipping analysis.")
             return None
             
         try:
-            # Get YES market price specifically or use first available if labeled differently
+            # 1. Prepare Data
             market_price_yes = 0.0
             for out in market_info["outcomes"]:
                 if "yes" in out["name"].lower():
                     market_price_yes = out["current_price"]
                     break
             
-            # Format raw strings for prompt
             metar_raw = json.dumps(weather_data.get("metar", [])[:5])
             taf_raw = json.dumps(weather_data.get("taf", [])[:2])
             
-            ecmwf_summary = weather_data.get("ecmwf_summary", "N/A - Pending integration")
-            gfs_hrrr_summary = weather_data.get("gfs_hrrr_summary", "N/A - Pending integration")
-            ensemble_summary = weather_data.get("ensemble_summary", "N/A - Pending integration")
+            ecmwf_summary = weather_data.get("ecmwf_summary", "N/A")
+            gfs_hrrr_summary = weather_data.get("gfs_hrrr_summary", "N/A")
+            ensemble_summary = weather_data.get("ensemble_summary", "N/A")
 
             content = f"""Market question: {market_info.get('question', '')}
-
-Current Market Price for YES: {market_price_yes}
-
-=== OFFICIAL AVIATION DATA (PRIMARY SOURCE) ===
-METAR (current observed): {metar_raw}
-TAF (official forecast): {taf_raw}
-
-=== MULTI-MODEL ENSEMBLE FORECASTS (FOR CORRECTION ONLY) ===
-Open-Meteo ECMWF IFS summary: {ecmwf_summary}
-Open-Meteo GFS + HRRR summary: {gfs_hrrr_summary}
-Ensemble consensus (51+ members): {ensemble_summary}
-
-Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probability using the weighted formula. Apply correction only where justified. Output ONLY the JSON."""
+Current Price for YES: {market_price_yes}
+METAR: {metar_raw}
+TAF: {taf_raw}
+ECMWF: {ecmwf_summary}
+GFS/HRRR: {gfs_hrrr_summary}
+Ensemble: {ensemble_summary}"""
 
             max_keys = len(self.clients)
             success = False
             response = None
             
-            # Circuit breaker check: REMOVED per user request
-            # if self.consecutive_failures >= 5:
-            #     return None
-
+            # 2. Key Selection Logic
+            try_indices = [forced_key_idx] if forced_key_idx is not None else range(max_keys)
+            
             for model_name in self.fallback_models:
                 if success: break
                 
-                for attempt in range(max_keys):
-                    # Rotate client index for every market to balance load
-                    # LOCKED SECTION: select key and handle per-key cooldown
-                    wait_needed = 0
-                    async with self.lock:
-                        idx = self.current_client_idx
-                        self.current_client_idx = (self.current_client_idx + 1) % max_keys
-                        
-                        client = self.clients[idx]
-                        meta = self.client_metadata[idx]
-                        
-                        # Throttle: Ensure at least 4.5s + jitter between uses of THIS specific key
-                        # Increasing to 4.5s for safer RPM compliance and adding 0-0.5s jitter
-                        base_delay = 4.5 + random.uniform(0, 0.5)
-                        now = time.time()
-                        elapsed = now - meta["last_used"]
-                        if elapsed < base_delay:
-                            wait_needed = base_delay - elapsed
-                        
-                        # Update last_used BEFORE releasing lock to "claim" the slot (including wait)
-                        meta["last_used"] = now + wait_needed
+                for attempt_idx in try_indices:
+                    # Resolve real index
+                    if forced_key_idx is not None:
+                        idx = forced_key_idx
+                    else:
+                        async with self.lock:
+                            idx = self.current_client_idx
+                            self.current_client_idx = (self.current_client_idx + 1) % max_keys
                     
-                    if wait_needed > 0:
-                        await asyncio.sleep(wait_needed)
+                    client = self.clients[idx]
+                    meta = self.client_metadata[idx]
                     
-                    # --- NEW: Global Staggered Step (Prevent 500 bursts) ---
-                    # Ensure at least 0.5s between ANY two API calls across the bot
+                    # Throttling
+                    base_delay = 4.5 + random.uniform(0, 0.5)
+                    now = time.time()
+                    elapsed = now - meta["last_used"]
+                    if elapsed < base_delay:
+                        await asyncio.sleep(base_delay - elapsed)
+                    
                     async with self.global_lock:
                         now_g = time.time()
                         wait_global = 0.5 - (now_g - self.last_global_call)
@@ -143,181 +113,93 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                             await asyncio.sleep(wait_global)
                         self.last_global_call = time.time()
                     
+                    meta["last_used"] = time.time()
+                    
                     try:
-                        # Execute generation using modern Async client OUTSIDE the lock
                         response = await client.aio.models.generate_content(
                             model=model_name,
                             contents=content,
                             config=self.generation_config
                         )
-                        success = True
-                        self.consecutive_failures = 0 # Reset on any success
-                        meta["use_count"] += 1                        
-                        # Warning if near 1500 daily limit (approximate)
-                        if meta["use_count"] > 1400:
-                            logger.warning(f"⚠️ [AI] Key {idx} reaching daily quote limit ({meta['use_count']}/1500)")
-                        
-                        break 
+                        if response and response.text:
+                            success = True
+                            meta["use_count"] += 1
+                            break
                     except Exception as api_err:
                         err_msg = str(api_err)
-                        if "429" in err_msg or "503" in err_msg or "quota" in err_msg.lower() or "500" in err_msg:
-                            # Penalty: Mark this key as used + 10s in the future
+                        if "429" in err_msg or "500" in err_msg or "quota" in err_msg.lower():
                             meta["last_used"] = time.time() + 10.0
-                            logger.warning(f"[AI] Error ({model_name}) on key {idx}: {err_msg[:60]}. Penalty 10s applied.")
-                            await asyncio.sleep(0.2) # Quick skip to next key
-
-    async def analyze_with_key(self, market: Dict, weather_data: Dict, key_idx: int) -> Optional[Dict]:
-        """
-        Special version for Worker-based analysis. Only uses the SPECIFIED client index.
-        This provides perfect isolation and rhythm for each key.
-        """
-        if key_idx >= len(self.clients):
-            return await self.analyze_market(market, weather_data) # Fallback
-            
-        client = self.clients[key_idx]
-        meta = self.client_metadata[key_idx]
-        base_delay = 4.5
-        
-        for model_name in self.fallback_models:
-            for attempt in range(2): # 2 attempts per model for this specific key
-                # 1. Local Cooldown
-                now = time.time()
-                elapsed = now - meta["last_used"]
-                if elapsed < base_delay:
-                    await asyncio.sleep(base_delay - elapsed)
-                
-                # 2. Global Stagger (Extra Safety)
-                async with self.global_lock:
-                    now_g = time.time()
-                    wait_global = 0.5 - (now_g - self.last_global_call)
-                    if wait_global > 0:
-                        await asyncio.sleep(wait_global)
-                    self.last_global_call = time.time()
-                
-                meta["last_used"] = time.time()
-                
-                try:
-                    prompt = self._build_prompt(market, weather_data)
-                    response = await client.aio.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.7
-                        )
-                    )
-                    
-                    if not response or not response.text:
-                        continue
-                        
-                    analysis = self._parse_response(response.text)
-                    if analysis:
-                        meta["use_count"] += 1
-                        return analysis
-                        
-                except Exception as api_err:
-                    err_msg = str(api_err)
-                    if "429" in err_msg or "500" in err_msg or "quota" in err_msg.lower():
-                        meta["last_used"] = time.time() + 10.0 # Penalty
-                        logger.warning(f"[AI] Worker Key {key_idx} Error: {err_msg[:60]}. Penalty applied.")
-                        await asyncio.sleep(2.0) # Longer breather for this worker
-                    else:
-                        logger.error(f"[AI] Worker Key {key_idx} Fatal Error: {err_msg[:60]}")
-                        break # Next model
-                        
-        return None
-                        elif "404" in err_msg or "not found" in err_msg.lower():
-                            logger.warning(f"[AI] Model {model_name} NOT FOUND (404). Skipping to next model.")
-                            break # Go to next model in fallback_models
+                            logger.warning(f"[AI] Key {idx} Error: {err_msg[:60]}. Penalty applied.")
                         else:
-                            logger.error(f"[AI] Unrecoverable Gemini API error: {api_err}")
-                            return None
+                            logger.error(f"[AI] Key {idx} Fatal: {err_msg[:60]}")
+                            
+                        if forced_key_idx is not None:
+                            await asyncio.sleep(2.0)
+                            continue # Try next model if applicable
             
-            if not success:
-                self.consecutive_failures += 1
+            if not success or not response:
                 return None
             
-            # Strict JSON parsing according to the new GEMINI.md schema
+            # 3. Parse and Calculate
             try:
                 analysis_data = json.loads(response.text)
             except json.JSONDecodeError:
-                # Fallback / SKIP if parsing fails
-                logger.error(f"Failed to decode GEMINI JSON. Falling back to SKIP. Output: {response.text}")
+                logger.error(f"JSON Error: {response.text}")
                 return None
 
-            # Log the full JSON and Reasoning as requested
             logger.info(f"AI JSON Response: {json.dumps(analysis_data, ensure_ascii=False)}")
-            logger.info(f"AI Reasoning: {analysis_data.get('reasoning', 'No reasoning provided')}")
+            logger.info(f"AI Reasoning: {analysis_data.get('reasoning', 'N/A')}")
 
-            edge_raw = analysis_data.get("edge", 0.0)
-            confidence = analysis_data.get("confidence", 0)
             rec = analysis_data.get("recommended_action", "SKIP")
             sentiment = analysis_data.get("sentiment", "NEUTRAL")
-            
+            confidence = analysis_data.get("confidence", 0)
             target_outcome_name = "Yes" if rec == "BUY_YES" else "No"
             
-            # Map to correct token_id and price
             matched_out = None
             for out in market_info["outcomes"]:
                 if out["name"].lower() == target_outcome_name.lower():
                     matched_out = out
                     break
             
-            if matched_out and matched_out["current_price"] >= 0.02:
+            if matched_out:
                 market_price = matched_out["current_price"]
-                
-                # Math Level 3: Fetch Self-Calibration Factor
                 city = market_info.get("city", "default")
                 calib_factor = calibration_engine.calculate_calibration_factor(city)
                 
-                # Apply Calibration Factor to Raw Probability
                 raw_prob_yes = analysis_data.get("true_probability", 0.0)
                 calibrated_prob_yes = min(0.99, max(0.01, raw_prob_yes * calib_factor))
                 
-                # Math Level 2: Calculate Expected Value (EV)
-                if target_outcome_name == "Yes":
-                    p = calibrated_prob_yes
-                else:
-                    p = 1.0 - calibrated_prob_yes
-                
-                # EV per $1 invested
+                p = calibrated_prob_yes if target_outcome_name == "Yes" else (1.0 - calibrated_prob_yes)
                 ev = (p * (1 - market_price)) - ((1 - p) * market_price)
                 
-                # Math Level 2: Fractional Kelly
                 edge_decimal = p - market_price
                 odds = (1 - market_price) / market_price if market_price > 0 else 0
                 full_kelly = (edge_decimal / odds) if odds > 0 else 0
                 fractional_kelly = full_kelly * config.kelly_fraction if full_kelly > 0 else 0.0
                 
-                # Get dynamic threshold
                 ev_threshold = config.ev_threshold.get(city, config.ev_threshold.get("default", 0.08))
                 
-                # New Entry Rules: EV > Config API Threshold, Positive Fractional Kelly, Confidence >= 82
                 if ev > ev_threshold and fractional_kelly > 0 and confidence >= 82 and "BUY" in rec:
                     return {
                         "market_id": market_info["market_id"],
-                        "question": market_info.get("question", ""),
                         "token_id": matched_out["token_id"],
-                        "icao_code": market_info.get("icao_code", ""),
-                        "current_price": market_price,
-                        "outcome_name": matched_out["name"],
                         "outcome_slug": target_outcome_name,
-                        "edge": edge_decimal * 100, # Converting back to pct for UI compatibility
+                        "market_price": market_price,
+                        "true_probability": p,
                         "ev": ev,
-                        "kelly_frac": fractional_kelly,
-                        "calibration_factor": calib_factor,
-                        "true_probability": calibrated_prob_yes,
+                        "edge": edge_decimal * 100,
+                        "kelly": fractional_kelly,
                         "confidence": confidence,
                         "sentiment": sentiment,
-                        "recommendation": rec
+                        "city": city
                     }
-                    
             return None
             
         except Exception as e:
-            logger.error(f"Error during AI multi-source analysis for {market_info.get('event_title')}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Global AI Error: {e}")
             return None
+
+    async def analyze_with_key(self, market: Dict, weather_data: Dict, key_idx: int) -> Optional[Dict]:
+        return await self.analyze_market(market, weather_data, forced_key_idx=key_idx)
 
 ai_analyzer = AIAnalyzer()
