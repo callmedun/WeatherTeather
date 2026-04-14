@@ -33,9 +33,8 @@ class AIAnalyzer:
             except Exception as diag_e:
                 logger.warning(f"[AI] Diagnostic failed: {diag_e}")
 
-        # Use a chain of Lite models for maximum stability. 
-        # 3.1-preview is prone to 503, so we prioritize 2.5 and 2.0.
-        self.fallback_models = ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemini-flash-lite-latest", "gemini-3.1-flash-lite-preview"]
+        # Use ONLY gemini-flash-lite-latest as requested by user.
+        self.fallback_models = ["gemini-flash-lite-latest"]
             
         # Provide fallback if GEMINI.md isn't located
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
@@ -99,10 +98,9 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
             success = False
             response = None
             
-            # Circuit breaker check: if we had 5 consecutive total failures previously, fail fast
-            if self.consecutive_failures >= 5:
-                # logger.warning("[AI] Circuit breaker ACTIVE. Skipping market analysis.")
-                return None
+            # Circuit breaker check: REMOVED per user request
+            # if self.consecutive_failures >= 5:
+            #     return None
 
             for model_name in self.fallback_models:
                 if success: break
@@ -155,8 +153,6 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
             
             if not success:
                 self.consecutive_failures += 1
-                if self.consecutive_failures >= 5:
-                    logger.error("!!! CIRCUIT BREAKER TRIGGERED !!! AI Service is unstable. Stopping analysis.")
                 return None
             
             # Strict JSON parsing according to the new GEMINI.md schema

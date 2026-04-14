@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     
     # AI Config
     gemini_api_keys_str: str = "" # Comma separated list of keys
-    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_model: str = "gemini-flash-lite-latest"
     
     # Notifications
     telegram_bot_token: str = ""
