@@ -24,7 +24,7 @@ class AIAnalyzer:
         self.consecutive_failures = 0 # Circuit breaker counter
         self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
         # Primary is gemini_model, fallback to flash-8b as it's often more available
-        self.fallback_models = [config.gemini_model, "gemini-1.5-flash-8b", "gemini-1.5-pro"]
+        self.fallback_models = ["gemini-flash-lite-latest", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
             
         # Provide fallback if GEMINI.md isn't located
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
