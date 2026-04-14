@@ -54,24 +54,16 @@ class BotScheduler:
                 if not city_markets:
                     continue
                 
-                logger.info(f"[{city}] Analyzing {len(city_markets)} markets sequentially...")
+                logger.info(f"[{city}] Analyzing {len(city_markets)} markets in parallel...")
                 
-                results_list = []
-                for market in city_markets:
-                    icao = market["icao_code"]
-                    w_data = weather_data_map.get(icao)
-                    if not w_data or (not w_data["metar"] and not w_data["taf"]):
-                        w_data = weather_fetcher.get_weather_for_icao(icao)
-                    
-                    if w_data and (w_data["metar"] or w_data["taf"]):
-                        # Pre-filter outcomes
-                        market["outcomes"] = [o for o in market.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
-                        
-                        if market["outcomes"]:
-                            analysis = await ai_analyzer.analyze_market(market, w_data)
-                            if analysis:
-                                analysis["city"] = city
-                                results_list.append(analysis)
+                # Semaphore to limit the number of simultaneous AI calls to the number of available keys
+                semaphore = asyncio.Semaphore(len(ai_analyzer.clients))
+                
+                # Analyze markets for THIS city in parallel using the semaphore
+                tasks = [self.analyze_market_task(m, weather_data_map, semaphore) for m in city_markets]
+                results_list = await asyncio.gather(*tasks)
+                
+                results_list = [r for r in results_list if r is not None]
                 
                 # Filter valid signals
                 signals_list = [r for r in results_list if r is not None]
@@ -124,6 +116,27 @@ class BotScheduler:
             logger.error(f"Error during scan cycle: {e}")
             import traceback
             traceback.print_exc()
+
+    async def analyze_market_task(self, market, weather_data_map, semaphore) -> Optional[dict]:
+        async with semaphore:
+            icao = market["icao_code"]
+            city = market["city"]
+            
+            w_data = weather_data_map.get(icao)
+            if not w_data or (not w_data["metar"] and not w_data["taf"]):
+                w_data = weather_fetcher.get_weather_for_icao(icao)
+            if not w_data or (not w_data["metar"] and not w_data["taf"]):
+                return None
+                
+            # Pre-filter outcomes (0.02-0.98 range)
+            market["outcomes"] = [o for o in market.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
+            if not market["outcomes"]:
+                return None
+
+            analysis = await ai_analyzer.analyze_market(market, w_data)
+            if analysis:
+                analysis["city"] = city
+            return analysis
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here

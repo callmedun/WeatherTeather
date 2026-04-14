@@ -93,13 +93,23 @@ Ensemble: {ensemble_summary}"""
                         meta = self.client_metadata[idx]
                         
                         # Throttle
-                        base_delay = 5.0 # Very safe
+                        base_delay = 4.1 # Target 15 RPM per key (60/4.1 ~ 14.6)
                         now = time.time()
                         elapsed = now - meta["last_used"]
                         if elapsed < base_delay:
                             await asyncio.sleep(base_delay - elapsed)
                         
+                        # UPDATED: Use a dummy last used to claim the slot
                         meta["last_used"] = time.time()
+                    
+                    # --- GLOBAL STAGGER (Safety across all keys) ---
+                    async with self.global_lock:
+                        now_g = time.time()
+                        # Minimum 0.5s between ANY two API calls across the entire bot
+                        wait_global = 0.5 - (now_g - self.last_global_call)
+                        if wait_global > 0:
+                            await asyncio.sleep(wait_global)
+                        self.last_global_call = time.time()
                     
                     try:
                         response = await client.aio.models.generate_content(
