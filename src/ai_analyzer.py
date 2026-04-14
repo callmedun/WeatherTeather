@@ -22,6 +22,7 @@ class AIAnalyzer:
             
         self.current_client_idx = 0
         self.consecutive_failures = 0 # Circuit breaker counter
+        self.lock = asyncio.Lock() # Lock for concurrent key selection
         self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
         
         # Diagnostic: List available models for key 0 on boot
@@ -106,23 +107,27 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                 if success: break
                 
                 for attempt in range(max_keys):
-                    # Rotate client index for every market to balance load (Round Robin)
-                    idx = self.current_client_idx
-                    self.current_client_idx = (self.current_client_idx + 1) % max_keys
+                    # Rotate client index for every market to balance load
+                    # LOCKED SECTION: select key and handle per-key cooldown
+                    async with self.lock:
+                        idx = self.current_client_idx
+                        self.current_client_idx = (self.current_client_idx + 1) % max_keys
+                        
+                        client = self.clients[idx]
+                        meta = self.client_metadata[idx]
+                        
+                        # Throttle: Ensure at least 4.1s between uses of THIS specific key
+                        now = time.time()
+                        elapsed = now - meta["last_used"]
+                        if elapsed < 4.1:
+                            wait_needed = 4.1 - elapsed
+                            await asyncio.sleep(wait_needed)
+                        
+                        # Update last_used BEFORE releasing lock to "claim" the 4s slot
+                        meta["last_used"] = time.time()
                     
-                    client = self.clients[idx]
-                    meta = self.client_metadata[idx]
-                    
-                    # Throttle: Ensure at least 4.1s between uses of THIS specific key
-                    now = time.time()
-                    elapsed = now - meta["last_used"]
-                    if elapsed < 4.1:
-                        wait_needed = 4.1 - elapsed
-                        # logger.debug(f"[AI] Key {idx} throttling ({wait_needed:.1f}s delay)...")
-                        await asyncio.sleep(wait_needed)
-
                     try:
-                        # Execute generation using modern Async client
+                        # Execute generation using modern Async client OUTSIDE the lock
                         response = await client.aio.models.generate_content(
                             model=model_name,
                             contents=content,
@@ -130,9 +135,7 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                         )
                         success = True
                         self.consecutive_failures = 0 # Reset on any success
-                        meta["last_used"] = time.time()
-                        meta["use_count"] += 1
-                        
+                        meta["use_count"] += 1                        
                         # Warning if near 1500 daily limit (approximate)
                         if meta["use_count"] > 1400:
                             logger.warning(f"⚠️ [AI] Key {idx} reaching daily quote limit ({meta['use_count']}/1500)")

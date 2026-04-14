@@ -15,6 +15,7 @@ class BotScheduler:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.discoverer = MarketDiscoverer()
+        self.city_lock = asyncio.Lock() # For thread-safe traded_cities access
 
     async def scan_and_trade(self):
         logger.info("=== Starting Full Scan & Trade Cycle ===")
@@ -46,70 +47,73 @@ class BotScheduler:
                 except Exception as e:
                     logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
 
-            # 3. Analyze each market
+            # 3. Analyze markets in parallel
             traded_cities_this_cycle = set()
+            semaphore = asyncio.Semaphore(max(1, len(ai_analyzer.clients) * 8))
+            
+            tasks = []
             for market in markets:
-                icao = market["icao_code"]
-                city = market["city"]
-                
-                # OPTIMIZATION: If we already found a trade for this city in this hour, save API keys 
-                if city in traded_cities_this_cycle:
-                    continue
-                    
-                w_data = weather_data_map.get(icao)
-                
-                # Check cache fallback if empty
-                if not w_data or (not w_data["metar"] and not w_data["taf"]):
-                    w_data = weather_fetcher.get_weather_for_icao(icao)
-                    
-                if not w_data or (not w_data["metar"] and not w_data["taf"]):
-                    logger.warning(f"No weather data available for {city} ({icao}). Skipping.")
-                    continue
-                    
-                q_text = str(market.get('question', '')).replace('\n', ' ').replace('\r', '').strip()
-                logger.debug(f"Checking {city} - {market['event_title']} | Q: {q_text}")
-                
-                # Pre-filter out purely guaranteed or dead outcomes
-                valid_outcomes = []
-                for out in market.get("outcomes", []):
-                    # Gamma cross-routed price correctly accounts for No-Bid / Yes-Ask inversions
-                    if 0.02 <= out["current_price"] <= 0.98:
-                        valid_outcomes.append(out)
-                
-                if not valid_outcomes:
-                    logger.debug(f"   -> Skipped (Prices out of bounds or dead market)")
-                    continue # Skip AI evaluation completely, no valid trades available
-                    
-                market["outcomes"] = valid_outcomes
-
-                logger.debug(f"   -> Valid constraints. Sending to AI...")
-                analysis = await ai_analyzer.analyze_market(market, w_data)
-                
-                # Check if API is totally down (circuit breaker) - REMOVED per user request
-                # if ai_analyzer.consecutive_failures >= 5:
-                #     logger.error("Stopping current scan cycle early: Gemini AI Service is unavailable.")
-                #     await send_telegram_message("🔴 <b>Gemini API Down:</b> Сканирование прервано из-за ошибок 503/429. Повторю через час.")
-                #     break
-
-                if analysis:
-                    logger.success(
-                        f"Trade signal! {city} -> BUY '{analysis.get('outcome_slug')}' "
-                        f"(EV: {analysis.get('ev', 0.0):+.3f}, Edge: {analysis.get('edge', 0.0):+.1f}%, Conf: {analysis.get('confidence')}/100, Kelly frac: {analysis.get('kelly_frac', 0.0):.2f})"
-                    )
-                    
-                    # Merge city info for the trading engine
-                    analysis["city"] = city
-                    await trading_engine.execute_trade(analysis)
-                    traded_cities_this_cycle.add(city)
-                
-                # Reduced base sleep because AIAnalyzer now handles per-key 4s throttle
-                await asyncio.sleep(1)
+                tasks.append(self.process_market(market, weather_data_map, semaphore, traded_cities_this_cycle))
+            
+            if tasks:
+                logger.info(f"Launching {len(tasks)} analysis tasks in parallel (Concurrency: {semaphore._value})...")
+                await asyncio.gather(*tasks)
                     
             logger.info("=== Scan & Trade Cycle Completed ===")
             
         except Exception as e:
             logger.error(f"Error during scan cycle: {e}")
+            import traceback
+            traceback.print_exc()
             await send_telegram_message(f"⚠️ Bot Exception in Scan Cycle:\n<pre>{e}</pre>")
+
+    async def process_market(self, market, weather_data_map, semaphore, traded_cities):
+        async with semaphore:
+            icao = market["icao_code"]
+            city = market["city"]
+            
+            # Short-circuit if city already traded
+            async with self.city_lock:
+                if city in traded_cities:
+                    return
+
+            w_data = weather_data_map.get(icao)
+            
+            # Check cache fallback if empty
+            if not w_data or (not w_data["metar"] and not w_data["taf"]):
+                w_data = weather_fetcher.get_weather_for_icao(icao)
+                
+            if not w_data or (not w_data["metar"] and not w_data["taf"]):
+                return
+                
+            # Pre-filter outcomes
+            valid_outcomes = []
+            for out in market.get("outcomes", []):
+                if 0.02 <= out["current_price"] <= 0.98:
+                    valid_outcomes.append(out)
+            
+            if not valid_outcomes:
+                return
+                
+            market["outcomes"] = valid_outcomes
+
+            # Send to AI
+            analysis = await ai_analyzer.analyze_market(market, w_data)
+            
+            if analysis:
+                async with self.city_lock:
+                    # Double check if someone else traded this city while we were waiting (batch race)
+                    if city in traded_cities:
+                        return
+                    
+                    logger.success(
+                        f"Trade signal! {city} -> BUY '{analysis.get('outcome_slug')}' "
+                        f"(EV: {analysis.get('ev', 0.0):+.3f}, Edge: {analysis.get('edge', 0.0):+.1f}%, Conf: {analysis.get('confidence')}/100, Kelly frac: {analysis.get('kelly_frac', 0.0):.2f})"
+                    )
+                    
+                    analysis["city"] = city
+                    await trading_engine.execute_trade(analysis)
+                    traded_cities.add(city)
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here

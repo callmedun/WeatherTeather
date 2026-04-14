@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     dry_run: bool = True
     max_trade_size_usd: float = 20.0
     default_trade_size: float = 15.0 # Required by PortfolioManager
-    min_trade_usd: float = 5.0
+    min_trade_usd: float = 2.0
     min_shares: int = 1
     max_decimals_amount: int = 2
     scan_interval_hours: int = 1
