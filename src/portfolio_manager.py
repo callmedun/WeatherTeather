@@ -332,12 +332,17 @@ class PortfolioManager:
                     exit_reason = None
                     sell_shares = shares
 
+                    # Ensure Stop Loss limits are treated as negative (loss) thresholds
+                    # to prevent accidental triggers if the user inputs positive numbers.
+                    sl_edge_threshold = -abs(sl_edge_limit)
+                    sl_pnl_threshold = -abs(sl_pnl_limit)
+                    
                     if new_edge <= tp_edge_limit:
                         exit_reason = "take_profit"
                     elif unrealized_pnl_percent >= strong_tp_limit:
                         exit_reason = "strong_take_profit"
                         sell_shares = int(shares / 2) # Partial sell
-                    elif new_edge <= sl_edge_limit or unrealized_pnl_percent <= sl_pnl_limit:
+                    elif new_edge <= sl_edge_threshold or unrealized_pnl_percent <= sl_pnl_threshold:
                         exit_reason = "stop_loss"
                     elif hours_to_resolve < time_exit_limit:
                         exit_reason = "time_based"
