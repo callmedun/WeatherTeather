@@ -21,10 +21,7 @@ class AIAnalyzer:
             self.clients.append(genai.Client(api_key=config.gemini_api_key))
             
         self.current_client_idx = 0
-        self.consecutive_failures = 0 
         self.lock = asyncio.Lock() 
-        self.global_lock = asyncio.Lock() 
-        self.last_global_call = 0.0
         self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
 
         # Use ONLY gemma-4-31b-it as requested by user.
@@ -49,7 +46,8 @@ class AIAnalyzer:
             ]
         )
 
-    async def analyze_market(self, market_info: Dict[str, Any], weather_data: Dict[str, Any], forced_key_idx: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    async def analyze_market(self, market_info: Dict[str, Any], weather_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Simple, strictly sequential analysis to prevent 429/500 errors."""
         if not self.clients:
             logger.warning("Gemini API key(s) missing, skipping analysis.")
             return None
@@ -81,39 +79,27 @@ Ensemble: {ensemble_summary}"""
             success = False
             response = None
             
-            # 2. Key Selection Logic
-            try_indices = [forced_key_idx] if forced_key_idx is not None else range(max_keys)
-            
+            # 2. Sequential Key Selection (ONE AT A TIME)
             for model_name in self.fallback_models:
                 if success: break
                 
-                for attempt_idx in try_indices:
-                    # Resolve real index
-                    if forced_key_idx is not None:
-                        idx = forced_key_idx
-                    else:
-                        async with self.lock:
-                            idx = self.current_client_idx
-                            self.current_client_idx = (self.current_client_idx + 1) % max_keys
-                    
-                    client = self.clients[idx]
-                    meta = self.client_metadata[idx]
-                    
-                    # Throttling
-                    base_delay = 4.5 + random.uniform(0, 0.5)
-                    now = time.time()
-                    elapsed = now - meta["last_used"]
-                    if elapsed < base_delay:
-                        await asyncio.sleep(base_delay - elapsed)
-                    
-                    async with self.global_lock:
-                        now_g = time.time()
-                        wait_global = 0.5 - (now_g - self.last_global_call)
-                        if wait_global > 0:
-                            await asyncio.sleep(wait_global)
-                        self.last_global_call = time.time()
-                    
-                    meta["last_used"] = time.time()
+                for attempt in range(max_keys):
+                    # Rotate key and check cooldown
+                    async with self.lock:
+                        idx = self.current_client_idx
+                        self.current_client_idx = (self.current_client_idx + 1) % max_keys
+                        
+                        client = self.clients[idx]
+                        meta = self.client_metadata[idx]
+                        
+                        # Throttle
+                        base_delay = 5.0 # Very safe
+                        now = time.time()
+                        elapsed = now - meta["last_used"]
+                        if elapsed < base_delay:
+                            await asyncio.sleep(base_delay - elapsed)
+                        
+                        meta["last_used"] = time.time()
                     
                     try:
                         response = await client.aio.models.generate_content(
@@ -128,14 +114,11 @@ Ensemble: {ensemble_summary}"""
                     except Exception as api_err:
                         err_msg = str(api_err)
                         if "429" in err_msg or "500" in err_msg or "quota" in err_msg.lower():
-                            meta["last_used"] = time.time() + 10.0
-                            logger.warning(f"[AI] Key {idx} Error: {err_msg[:60]}. Penalty applied.")
+                            logger.warning(f"[AI] Key {idx} Error: {err_msg[:60]}. Skipping to next key.")
+                            meta["last_used"] = time.time() + 10.0 # Small lockout
                         else:
                             logger.error(f"[AI] Key {idx} Fatal: {err_msg[:60]}")
-                            
-                        if forced_key_idx is not None:
-                            await asyncio.sleep(2.0)
-                            continue # Try next model if applicable
+                            break # Try next model if applicable
             
             if not success or not response:
                 return None
@@ -182,7 +165,9 @@ Ensemble: {ensemble_summary}"""
                 if ev > ev_threshold and fractional_kelly > 0 and confidence >= 82 and "BUY" in rec:
                     return {
                         "market_id": market_info["market_id"],
+                        "question": market_info.get("question", "Unknown"),
                         "token_id": matched_out["token_id"],
+                        "outcome_name": matched_out["name"],
                         "outcome_slug": target_outcome_name,
                         "market_price": market_price,
                         "true_probability": p,
@@ -198,8 +183,5 @@ Ensemble: {ensemble_summary}"""
         except Exception as e:
             logger.error(f"Global AI Error: {e}")
             return None
-
-    async def analyze_with_key(self, market: Dict, weather_data: Dict, key_idx: int) -> Optional[Dict]:
-        return await self.analyze_market(market, weather_data, forced_key_idx=key_idx)
 
 ai_analyzer = AIAnalyzer()
