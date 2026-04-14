@@ -21,7 +21,8 @@ class AIAnalyzer:
             
         self.current_client_idx = 0
         self.consecutive_failures = 0 # Circuit breaker counter
-        self.fallback_models = [config.gemini_model, "gemini-1.5-flash"]
+        # Primary is gemini_model, fallback to flash-8b as it's often more available
+        self.fallback_models = [config.gemini_model, "gemini-1.5-flash-8b", "gemini-1.5-pro"]
             
         # Provide fallback if GEMINI.md isn't located
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
@@ -109,12 +110,14 @@ Task: Follow the System Prompt from GEMINI.md exactly. Calculate True Probabilit
                         err_msg = str(api_err)
                         if "429" in err_msg or "503" in err_msg or "quota" in err_msg.lower():
                             wait_time = (attempt + 1) * 2
-                            logger.warning(f"Gemini API error ({model_name}) on key {self.current_client_idx}: {err_msg[:60]}. Waiting {wait_time}s...")
+                            logger.warning(f"[AI] Error ({model_name}) on key {self.current_client_idx}: {err_msg[:60]}. Waiting {wait_time}s...")
                             await asyncio.sleep(wait_time)
-                            
                             self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
+                        elif "404" in err_msg or "not found" in err_msg.lower():
+                            logger.warning(f"[AI] Model {model_name} NOT FOUND (404). Skipping to next model.")
+                            break # Go to next model in fallback_models
                         else:
-                            logger.error(f"Unrecoverable Gemini API error: {api_err}")
+                            logger.error(f"[AI] Unrecoverable Gemini API error: {api_err}")
                             return None
             
             if not success:
