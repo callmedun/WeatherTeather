@@ -315,14 +315,27 @@ class SelfCalibration:
                 ev_sum += r.get("ev", 0.0)
                 
                 if r.get("status") == "closed":
-                    size = r.get('size_usd', 0)
-                    price = r.get('price_at_buy', 1.0)
-                    if r.get("actual_outcome") is True:
-                        wins += 1
-                        pnl += ((size / price) - size)
+                    trade_pnl = 0.0
+                    if r.get("realized_pnl") is not None:
+                        trade_pnl = r["realized_pnl"]
                     else:
+                        size = r.get('size_usd', 0)
+                        price = r.get('price_at_buy', 1.0)
+                        if r.get("actual_outcome") is True:
+                            trade_pnl = ((size / price) - size)
+                        else:
+                            trade_pnl = -size
+                    
+                    pnl += trade_pnl
+                    if trade_pnl > 0:
+                        wins += 1
+                    elif trade_pnl < 0:
                         losses += 1
-                        pnl -= size
+                    else:
+                        # Breakeven - we can decide to count as loss or win, 
+                        # but usually neutral trades are excluded or counted as losses.
+                        # We'll leave it out of both counters to not skew WR.
+                        pass
                         
         resolved = wins + losses
         win_rate = (wins / resolved * 100) if resolved > 0 else 0
