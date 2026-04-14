@@ -274,10 +274,6 @@ class PortfolioManager:
                         logger.debug(f"[MONITOR 10min] Skipping {trade.city} - no predicted_prob in memory.")
                         continue
                         
-                    bought_outcome = mem.get('bought_outcome', '').lower()
-                    if bought_outcome == 'no':
-                        predicted_prob = 1.0 - predicted_prob
-                        
                     # Calculate true starting edge manually in case it wasn't saved in json
                     starting_edge = (predicted_prob - trade.entry_price) * 100 
 
@@ -342,17 +338,17 @@ class PortfolioManager:
                     sell_shares = shares
 
                     # Ensure Stop Loss limits are treated as negative (loss) thresholds
-                    # to prevent accidental triggers if the user inputs positive numbers.
                     sl_edge_threshold = -abs(sl_edge_limit)
                     sl_pnl_threshold = -abs(sl_pnl_limit)
                     
-                    if new_edge <= tp_edge_limit:
-                        exit_reason = "take_profit"
+                    # PRIORITY ORDER: Stop Loss -> Strong TP -> Normal TP -> Time Exit
+                    if new_edge <= sl_edge_threshold or unrealized_pnl_percent <= sl_pnl_threshold:
+                        exit_reason = "stop_loss"
                     elif unrealized_pnl_percent >= strong_tp_limit:
                         exit_reason = "strong_take_profit"
                         sell_shares = int(shares / 2) # Partial sell
-                    elif new_edge <= sl_edge_threshold or unrealized_pnl_percent <= sl_pnl_threshold:
-                        exit_reason = "stop_loss"
+                    elif new_edge <= tp_edge_limit and unrealized_pnl_percent > 0:
+                        exit_reason = "take_profit"
                     elif hours_to_resolve < time_exit_limit:
                         exit_reason = "time_based"
 

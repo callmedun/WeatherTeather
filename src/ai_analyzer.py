@@ -83,56 +83,62 @@ Ensemble: {ensemble_summary}"""
             success = False
             response = None
             
-            # 2. Sequential Key Selection (ONE AT A TIME)
-            for model_name in self.fallback_models:
+            # 2. Sequential Key Selection (with Retry Loop if all keys fail)
+            for retry_attempt in range(3):
                 if success: break
                 
-                for attempt in range(max_keys):
-                    # Rotate key and check cooldown
-                    async with self.lock:
-                        idx = self.current_client_idx
-                        self.current_client_idx = (self.current_client_idx + 1) % max_keys
-                        
-                        client = self.clients[idx]
-                        meta = self.client_metadata[idx]
-                        
-                        # Throttle
-                        base_delay = 4.1 # Target 15 RPM per key (60/4.1 ~ 14.6)
-                        now = time.time()
-                        elapsed = now - meta["last_used"]
-                        if elapsed < base_delay:
-                            await asyncio.sleep(base_delay - elapsed)
-                        
-                        # UPDATED: Use a dummy last used to claim the slot
-                        meta["last_used"] = time.time()
+                if retry_attempt > 0:
+                    wait_retry = 3.0 + (retry_attempt * 2.0)
+                    logger.info(f"All keys failed with 429/500. Retrying analysis in {wait_retry}s (Attempt {retry_attempt+1}/3)...")
+                    await asyncio.sleep(wait_retry)
+
+                for model_name in self.fallback_models:
+                    if success: break
                     
-                    # --- GLOBAL STAGGER (Safety across all keys) ---
-                    async with self.global_lock:
-                        now_g = time.time()
-                        # Minimum 0.5s between ANY two API calls across the entire bot
-                        wait_global = 0.5 - (now_g - self.last_global_call)
-                        if wait_global > 0:
-                            await asyncio.sleep(wait_global)
-                        self.last_global_call = time.time()
-                    
-                    try:
-                        response = await client.aio.models.generate_content(
-                            model=model_name,
-                            contents=content,
-                            config=self.generation_config
-                        )
-                        if response and response.text:
-                            success = True
-                            meta["use_count"] += 1
-                            break
-                    except Exception as api_err:
-                        err_msg = str(api_err)
-                        if "429" in err_msg or "500" in err_msg or "quota" in err_msg.lower():
-                            logger.warning(f"[AI] Key {idx} Error: {err_msg[:60]}. Skipping to next key.")
-                            meta["last_used"] = time.time() + 10.0 # Small lockout
-                        else:
-                            logger.error(f"[AI] Key {idx} Fatal: {err_msg[:60]}")
-                            break # Try next model if applicable
+                    for attempt in range(max_keys):
+                        # Rotate key and check cooldown
+                        async with self.lock:
+                            idx = self.current_client_idx
+                            self.current_client_idx = (self.current_client_idx + 1) % max_keys
+                            
+                            client = self.clients[idx]
+                            meta = self.client_metadata[idx]
+                            
+                            # Throttle
+                            base_delay = 4.1 # Target 15 RPM per key
+                            now = time.time()
+                            elapsed = now - meta["last_used"]
+                            if elapsed < base_delay:
+                                await asyncio.sleep(base_delay - elapsed)
+                            
+                            meta["last_used"] = time.time()
+                        
+                        # --- GLOBAL STAGGER (Safety across all keys) ---
+                        async with self.global_lock:
+                            now_g = time.time()
+                            wait_global = 0.5 - (now_g - self.last_global_call)
+                            if wait_global > 0:
+                                await asyncio.sleep(wait_global)
+                            self.last_global_call = time.time()
+                        
+                        try:
+                            response = await client.aio.models.generate_content(
+                                model=model_name,
+                                contents=content,
+                                config=self.generation_config
+                            )
+                            if response and response.text:
+                                success = True
+                                meta["use_count"] += 1
+                                break
+                        except Exception as api_err:
+                            err_msg = str(api_err)
+                            if "429" in err_msg or "500" in err_msg or "quota" in err_msg.lower():
+                                logger.warning(f"[AI] Key {idx} Error: {err_msg[:60]}. Skipping to next key.")
+                                meta["last_used"] = time.time() + 10.0 # Small lockout
+                            else:
+                                logger.error(f"[AI] Key {idx} Fatal: {err_msg[:60]}")
+                                break # Try next model if applicable
             
             if not success or not response:
                 return None
