@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     clob_api_key: str = ""
     clob_api_secret: str = ""
     clob_api_passphrase: str = ""
-    poly_private_key: str = ""
+    polymarket_private_key: str = "" # Fixed from poly_private_key
+    funder_address: str = "" # Added back
+    chain_id: int = 137 # Added back
     
     # AI Config
     gemini_api_keys_str: str = "" # Comma separated list of keys
