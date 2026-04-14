@@ -23,8 +23,18 @@ class AIAnalyzer:
         self.current_client_idx = 0
         self.consecutive_failures = 0 # Circuit breaker counter
         self.client_metadata = [{"last_used": 0.0, "use_count": 0} for _ in range(len(self.clients))]
-        # Experiment: Only use the stable gemini-1.5-flash.
-        self.fallback_models = ["gemini-1.5-flash"]
+        
+        # Diagnostic: List available models for key 0 on boot
+        if self.clients:
+            try:
+                models = self.clients[0].models.list()
+                model_names = [m.name for m in models]
+                logger.info(f"[AI] Diagnostic: Available models for key 0: {model_names}")
+            except Exception as diag_e:
+                logger.warning(f"[AI] Diagnostic failed: {diag_e}")
+
+        # Primary is gemini-2.0-flash, fallback to lite if available
+        self.fallback_models = ["gemini-2.0-flash", "gemini-flash-lite-latest"]
             
         # Provide fallback if GEMINI.md isn't located
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
