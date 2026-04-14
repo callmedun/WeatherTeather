@@ -22,27 +22,32 @@ class Settings(BaseSettings):
     # Notifications
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    telegram_enabled: bool = True
+    telegram_menu_enabled: bool = True # Required by telegram_bot.py
     
     # Trading Params
     dry_run: bool = True
     max_trade_size_usd: float = 20.0
-    min_trade_usd: float = 5.0 # Required by TradingEngine
-    min_shares: int = 1 # Required by TradingEngine
-    max_decimals_amount: int = 2 # Required by TradingEngine
+    default_trade_size: float = 15.0 # Required by PortfolioManager
+    min_trade_usd: float = 5.0
+    min_shares: int = 1
+    max_decimals_amount: int = 2
     scan_interval_hours: int = 1
     scan_days_ahead: int = 2
     resolution_check_interval_minutes: int = 15
     
+    # Risk & Exposure
+    max_total_exposure: float = 0.5 # Required by PortfolioManager (50% of bankroll)
+    max_city_exposure: float = 0.1 # Required by PortfolioManager (10% of bankroll)
+    
     # Calibration
-    calibration_min_trades: int = 3 # Required by SelfCalibration
+    calibration_min_trades: int = 3
     
     # Kelly & EV Thresholds
     kelly_fraction: float = 0.1
     # EV thresholds per city (default + specific overrides)
     ev_threshold: Dict[str, float] = {
         "default": 0.08,
-        "London": 0.12 # Example override
+        "London": 0.12
     }
     
     # City-ICAO Mapping for Weather
