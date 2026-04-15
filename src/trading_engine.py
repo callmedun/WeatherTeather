@@ -32,132 +32,145 @@ class TradingEngine:
             logger.error(f"Failed to initialize PyClob API: {e}")
             self.client = None
 
+    def _get_effective_fill(self, token_id: str, target_usd: float) -> tuple[float, float, float]:
+        """Calculates Weighted Average Price (WAP) for a given USD size based on order book depth."""
+        if not self.client:
+            return 0.0, 0.0, 0.0
+            
+        try:
+            book = self.client.get_order_book(token_id)
+            asks = getattr(book, "asks", [])
+            if not asks:
+                return 0.0, 0.0, 0.0
+                
+            total_cost = 0.0
+            total_shares = 0.0
+            
+            # Asks are usually sorted by price ascending
+            for ask in asks:
+                p = float(getattr(ask, 'price', 0.0))
+                s = float(getattr(ask, 'size', 0.0))
+                
+                remaining_usd = target_usd - total_cost
+                if remaining_usd <= 0:
+                    break
+                    
+                level_max_cost = s * p
+                if level_max_cost <= remaining_usd:
+                    total_cost += level_max_cost
+                    total_shares += s
+                else:
+                    shares_needed = remaining_usd / p
+                    total_cost += remaining_usd
+                    total_shares += shares_needed
+                    break
+            
+            if total_shares == 0:
+                return 0.0, 0.0, 0.0
+                
+            avg_price = total_cost / total_shares
+            return avg_price, total_shares, total_cost
+        except Exception as e:
+            logger.warning(f"Depth check failed for {token_id}: {e}")
+            return 0.0, 0.0, 0.0
+
     async def execute_trade(self, analysis: dict):
         city = analysis.get("city", "Unknown")
         target_token = analysis.get("token_id")
-        price = analysis.get("market_price")
+        best_ask_price = analysis.get("market_price") # This is top-of-book from discovery
+        true_prob = analysis.get("true_probability", 0.0)
         sentiment = analysis.get("sentiment", "NEUTRAL")
         
-        logger.info(f"Preparing trade for {city} | Sentiment: {sentiment} | Outcome: {analysis.get('outcome_slug')} | Expected Price: {price}")
+        logger.info(f"Preparing trade for {city} | Outcome: {analysis.get('outcome_slug')} | Top Ask: {best_ask_price}")
 
-        # Match Fractional Kelly sizing from AI Analysis
+        # 1. Calculate Initial Kelly Sizing
         kelly_frac = analysis.get("kelly", 0.0)
-        
-        # Target payout scales linearly with fractional Kelly. 
         target_payout = 100.0 * kelly_frac
+        initial_shares = target_payout / (1 - best_ask_price) if best_ask_price < 1 else 0
+        intended_size = initial_shares * best_ask_price
         
-        # Calculate ideal constraints
-        shares_to_buy = target_payout / (1 - price) if price < 1 else 0
-        cost = shares_to_buy * price
-        
-        # 1. Reject microscopic trades to avoid gas overhead
-        if cost < config.min_trade_usd:
-            logger.info(f"Skipping trade: Too small after Kelly (${cost:.2f} < ${config.min_trade_usd})")
+        if intended_size < config.min_trade_usd:
+            logger.info(f"Skipping trade: Kelly size too small (${intended_size:.2f})")
             return
-            
-        # 2. Polymarket ClobClient API strictly enforces NO fractional shares and decimals clamping
-        shares_to_buy = int(max(config.min_shares, round(shares_to_buy)))
-        cost = round(float(shares_to_buy * price), config.max_decimals_amount)
-        
-        # Re-check after rounding just in case of weird pricing rounding below threshold
-        if cost < config.min_trade_usd:
-            logger.info(f"Skipping trade: Too small after Kelly rounding (${cost:.2f} < ${config.min_trade_usd})")
+
+        # 2. SMART DEPTH CHECK: Calculate effective price for our size
+        if not config.dry_run and self.client:
+            eff_price, eff_shares, filled_usd = self._get_effective_fill(target_token, intended_size)
+        else:
+            # In dry run or if client missing, assume 0.5% slippage for safety in logs
+            eff_price = best_ask_price * 1.005 
+            eff_shares = intended_size / eff_price
+            filled_usd = intended_size
+
+        if eff_price == 0:
+            logger.warning(f"Trade aborted: No liquidity found in order book for {city}")
             return
+
+        # 3. SLIPPAGE FILTER: Re-calculate EV with effective price
+        ev_threshold = config.ev_threshold.get(city, config.ev_threshold.get("default", 0.08))
+        new_ev = (true_prob * (1 - eff_price)) - ((1 - true_prob) * eff_price)
+        slippage = ((eff_price - best_ask_price) / best_ask_price) * 100 if best_ask_price > 0 else 0
+
+        if new_ev < ev_threshold:
+            # If slippage ruins the trade, try to reduce size to find a sweet spot
+            logger.warning(f"Slippage too high ({slippage:.1f}%). New EV {new_ev:.3f} < {ev_threshold}. Attempting to scale down size...")
+            # Try to buy only what's available at the top levels (limit to 50% of intended size)
+            intended_size = intended_size * 0.5
+            eff_price, eff_shares, filled_usd = self._get_effective_fill(target_token, intended_size)
+            new_ev = (true_prob * (1 - eff_price)) - ((1 - true_prob) * eff_price)
             
-        intended_size = cost
-        shares = shares_to_buy
-        profit_percent = round(((shares - intended_size) / intended_size) * 100, 2) if intended_size > 0 else 0
+            if new_ev < ev_threshold or filled_usd < config.min_trade_usd:
+                logger.error(f"Trade aborted: Depth too thin for {city}. Even at ${filled_usd:.2f}, EV {new_ev:.3f} is below threshold.")
+                return
+            logger.info(f"Scaledown successful. Reduced size to ${intended_size:.2f} @ {eff_price:.3f}")
+
+        # 4. Finalize execution params
+        shares = int(max(config.min_shares, round(eff_shares)))
+        final_cost = round(float(shares * eff_price), config.max_decimals_amount)
+        profit_percent = round(((shares - final_cost) / final_cost) * 100, 2) if final_cost > 0 else 0
         
         # Check exposure limits
-        if not portfolio_manager.can_trade_city(city, intended_size):
+        if not portfolio_manager.can_trade_city(city, final_cost):
             logger.info("Skipping trade due to exposure limits.")
             return
 
         if config.dry_run:
-            logger.info(f"[DRY RUN] Would execute BUY of {intended_size:.2f} USD ({shares} shares) on token {target_token} at ~{price}")
-            # Still record the paper trade
-            portfolio_manager.record_trade(
-                market_id=analysis["market_id"],
-                token_id=target_token,
-                city=city,
-                outcome=analysis.get("outcome_name"),
-                price=price,
-                size=intended_size,
-                sentiment=sentiment
-            )
-            calibration_engine.save_prediction(
-                market_id=analysis["market_id"],
-                outcome_token_id=target_token,
-                city=city,
-                icao=analysis.get("icao_code", ""),
-                question=analysis.get("question", ""),
-                predicted_prob=analysis.get("true_probability", 0.0), # Stored dynamically from AI payload
-                bought_outcome=analysis.get("outcome_slug", ""),
-                price_at_buy=price,
-                size_usd=intended_size,
-                ev=analysis.get("ev", 0.0)
-            )
+            logger.info(f"[DRY RUN] Execute: {final_cost:.2f} USD ({shares} shares) | Price: {eff_price:.3f} | Slippage: {slippage:.1f}%")
+            portfolio_manager.record_trade(analysis["market_id"], target_token, city, analysis.get("outcome_name"), eff_price, final_cost, sentiment)
+            calibration_engine.save_prediction(analysis["market_id"], target_token, city, analysis.get("icao_code", ""), analysis.get("question", ""), true_prob, analysis.get("outcome_slug", ""), eff_price, final_cost, new_ev)
+            
             await send_telegram_message(
                 f"<b>[DRY RUN] Trade Executed</b>\n"
                 f"<b>City:</b> {city}\n"
-                f"<b>Question:</b> {analysis.get('question')}\n"
                 f"<b>Outcome:</b> {analysis.get('outcome_name')}\n"
-                f"<b>Shares Bought:</b> {shares}\n"
-                f"<b>Invested:</b> ${intended_size}\n"
-                f"<b>Kelly Fractional Size:</b> {kelly_frac:.3f}\n"
-                f"<b>Potential Profit:</b> {profit_percent}%\n"
+                f"<b>Shares:</b> {shares}\n"
+                f"<b>Price (Avg):</b> {eff_price:.3f} (Slip: {slippage:.1f}%)\n"
+                f"<b>Invested:</b> ${final_cost}\n"
+                f"<b>new EV:</b> {new_ev:.3f}\n"
                 f"<b>AI Confidence:</b> {analysis.get('confidence')}/100"
             )
             return
 
-        if self.client is None:
-            logger.error("Client is not initialized. Cannot execute real trade.")
-            return
-            
         try:
-            # Per official docs: For BUY, the exact USD amount is passed. For SELL, shares are passed.
-            order_args = OrderArgs(
-                price=price,
-                size=intended_size,
-                side="BUY",
-                token_id=target_token
-            )
+            # Polymarket use LIMIT orders. We set the price to our calculated WAP or a bit higher to ensure fill
+            order_args = OrderArgs(price=round(eff_price + 0.001, 3), size=final_cost, side="BUY", token_id=target_token)
             
-            logger.info(f"Submitting LIVE order: {shares} shares @ {price}")
+            logger.info(f"Submitting LIVE order: {shares} shares @ {eff_price:.3f}")
             resp = self.client.create_and_post_order(order_args)
             
             if resp and resp.get("success"):
                 logger.success(f"Trade successful! Order ID: {resp.get('orderID')}")
-                portfolio_manager.record_trade(
-                    market_id=analysis["market_id"],
-                    token_id=target_token,
-                    city=city,
-                    outcome=analysis.get("outcome_name"),
-                    price=price,
-                    size=intended_size,
-                    sentiment=sentiment
-                )
-                calibration_engine.save_prediction(
-                    market_id=analysis["market_id"],
-                    outcome_token_id=target_token,
-                    city=city,
-                    icao=analysis.get("icao_code", ""),
-                    question=analysis.get("question", ""),
-                    predicted_prob=analysis.get("true_probability", 0.0),
-                    bought_outcome=analysis.get("outcome_slug", ""),
-                    price_at_buy=price,
-                    size_usd=intended_size,
-                    ev=analysis.get("ev", 0.0)
-                )
+                portfolio_manager.record_trade(analysis["market_id"], target_token, city, analysis.get("outcome_name"), eff_price, final_cost, sentiment)
+                calibration_engine.save_prediction(analysis["market_id"], target_token, city, analysis.get("icao_code", ""), analysis.get("question", ""), true_prob, analysis.get("outcome_slug", ""), eff_price, final_cost, new_ev)
+                
                 await send_telegram_message(
                     f"🟢 <b>LIVE Trade Executed</b>\n"
                     f"<b>City:</b> {city}\n"
-                    f"<b>Question:</b> {analysis.get('question')}\n"
                     f"<b>Outcome:</b> {analysis.get('outcome_name')}\n"
-                    f"<b>Shares Bought:</b> {shares}\n"
-                    f"<b>Invested:</b> ${intended_size}\n"
-                    f"<b>Kelly Fractional Size:</b> {kelly_frac:.3f}\n"
-                    f"<b>Potential Profit:</b> {profit_percent}%\n"
+                    f"<b>Shares:</b> {shares}\n"
+                    f"<b>Price (Avg):</b> {eff_price:.3f} (Slip: {slippage:.1f}%)\n"
+                    f"<b>Invested:</b> ${final_cost}\n"
+                    f"<b>new EV:</b> {new_ev:.3f}\n"
                     f"<b>AI Confidence:</b> {analysis.get('confidence')}/100"
                 )
             else:
