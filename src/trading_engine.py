@@ -47,6 +47,7 @@ class TradingEngine:
             total_shares = 0.0
             
             # Asks are usually sorted by price ascending
+            logger.info(f"Analyzing depth for ${target_usd:.2f}...")
             for ask in asks:
                 p = float(getattr(ask, 'price', 0.0))
                 s = float(getattr(ask, 'size', 0.0))
@@ -59,16 +60,19 @@ class TradingEngine:
                 if level_max_cost <= remaining_usd:
                     total_cost += level_max_cost
                     total_shares += s
+                    logger.debug(f"  - Filled {s:.1f} shares @ {p:.3f}")
                 else:
                     shares_needed = remaining_usd / p
                     total_cost += remaining_usd
                     total_shares += shares_needed
+                    logger.debug(f"  - Filled {shares_needed:.1f}/{s:.1f} shares @ {p:.3f}")
                     break
             
             if total_shares == 0:
                 return 0.0, 0.0, 0.0
                 
             avg_price = total_cost / total_shares
+            logger.info(f"Target: ${target_usd:.2f} | Execution: ${total_cost:.2f} | Avg Price: {avg_price:.3f}")
             return avg_price, total_shares, total_cost
         except Exception as e:
             logger.warning(f"Depth check failed for {token_id}: {e}")
@@ -94,10 +98,10 @@ class TradingEngine:
             return
 
         # 2. SMART DEPTH CHECK: Calculate effective price for our size
-        if not config.dry_run and self.client:
+        if self.client:
             eff_price, eff_shares, filled_usd = self._get_effective_fill(target_token, intended_size)
         else:
-            # In dry run or if client missing, assume 0.5% slippage for safety in logs
+            # Fallback if no client (should not happen in main flow)
             eff_price = best_ask_price * 1.005 
             eff_shares = intended_size / eff_price
             filled_usd = intended_size
@@ -137,15 +141,18 @@ class TradingEngine:
         if config.dry_run:
             logger.info(f"[DRY RUN] Execute: {final_cost:.2f} USD ({shares} shares) | Price: {eff_price:.3f} | Slippage: {slippage:.1f}%")
             portfolio_manager.record_trade(analysis["market_id"], target_token, city, analysis.get("outcome_name"), eff_price, final_cost, sentiment)
-            calibration_engine.save_prediction(analysis["market_id"], target_token, city, analysis.get("icao_code", ""), analysis.get("question", ""), true_prob, analysis.get("outcome_slug", ""), eff_price, final_cost, new_ev)
+            calibration_engine.save_prediction(analysis["market_id"], target_token, city, analysis.get("icao_code", ""), analysis.get("question", ""), true_prob, analysis.get("outcome_slug", ""), eff_price, new_ev, final_cost)
             
             await send_telegram_message(
                 f"<b>[DRY RUN] Trade Executed</b>\n"
                 f"<b>City:</b> {city}\n"
+                f"<b>Question:</b> {analysis.get('question')}\n"
                 f"<b>Outcome:</b> {analysis.get('outcome_name')}\n"
-                f"<b>Shares:</b> {shares}\n"
+                f"<b>Shares Bought:</b> {shares}\n"
                 f"<b>Price (Avg):</b> {eff_price:.3f} (Slip: {slippage:.1f}%)\n"
                 f"<b>Invested:</b> ${final_cost}\n"
+                f"<b>Kelly Fractional Size:</b> {kelly_frac:.3f}\n"
+                f"<b>Potential Profit:</b> {profit_percent}%\n"
                 f"<b>new EV:</b> {new_ev:.3f}\n"
                 f"<b>AI Confidence:</b> {analysis.get('confidence')}/100"
             )
@@ -161,15 +168,18 @@ class TradingEngine:
             if resp and resp.get("success"):
                 logger.success(f"Trade successful! Order ID: {resp.get('orderID')}")
                 portfolio_manager.record_trade(analysis["market_id"], target_token, city, analysis.get("outcome_name"), eff_price, final_cost, sentiment)
-                calibration_engine.save_prediction(analysis["market_id"], target_token, city, analysis.get("icao_code", ""), analysis.get("question", ""), true_prob, analysis.get("outcome_slug", ""), eff_price, final_cost, new_ev)
+                calibration_engine.save_prediction(analysis["market_id"], target_token, city, analysis.get("icao_code", ""), analysis.get("question", ""), true_prob, analysis.get("outcome_slug", ""), eff_price, new_ev, final_cost)
                 
                 await send_telegram_message(
                     f"🟢 <b>LIVE Trade Executed</b>\n"
                     f"<b>City:</b> {city}\n"
+                    f"<b>Question:</b> {analysis.get('question')}\n"
                     f"<b>Outcome:</b> {analysis.get('outcome_name')}\n"
-                    f"<b>Shares:</b> {shares}\n"
+                    f"<b>Shares Bought:</b> {shares}\n"
                     f"<b>Price (Avg):</b> {eff_price:.3f} (Slip: {slippage:.1f}%)\n"
                     f"<b>Invested:</b> ${final_cost}\n"
+                    f"<b>Kelly Fractional Size:</b> {kelly_frac:.3f}\n"
+                    f"<b>Potential Profit:</b> {profit_percent}%\n"
                     f"<b>new EV:</b> {new_ev:.3f}\n"
                     f"<b>AI Confidence:</b> {analysis.get('confidence')}/100"
                 )
