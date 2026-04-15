@@ -266,6 +266,48 @@ class PortfolioManager:
 
         return True
 
+    def _get_effective_exit_price(self, clob_client, token_id: str, target_shares: float) -> tuple[float, float, float]:
+        """Calculates Weighted Average Price (WAP) of bids for a given amount of shares."""
+        if not clob_client or target_shares <= 0:
+            return 0.0, 0.0, 0.0
+            
+        try:
+            ob = clob_client.get_order_book(token_id)
+            bids = getattr(ob, "bids", [])
+            if not bids:
+                return 0.0, 0.0, 0.0
+            
+            # Sort BIDS descending (highest to lowest) for selling
+            sorted_bids = sorted(bids, key=lambda x: float(getattr(x, 'price', 0.0)), reverse=True)
+            
+            total_shares_filled = 0.0
+            total_receive_usd = 0.0
+            
+            for bid in sorted_bids:
+                p = float(getattr(bid, 'price', 0.0))
+                s = float(getattr(bid, 'size', 0.0))
+                
+                remaining_shares = target_shares - total_shares_filled
+                if remaining_shares <= 0:
+                    break
+                    
+                if s <= remaining_shares:
+                    total_shares_filled += s
+                    total_receive_usd += s * p
+                else:
+                    total_receive_usd += remaining_shares * p
+                    total_shares_filled += remaining_shares
+                    break
+            
+            if total_shares_filled == 0:
+                return 0.0, 0.0, 0.0
+                
+            avg_price = total_receive_usd / total_shares_filled
+            return avg_price, total_shares_filled, total_receive_usd
+        except Exception as e:
+            logger.warning(f"[Portfolio] Exit depth check failed for {token_id}: {e}")
+            return 0.0, 0.0, 0.0
+
     async def monitor_open_trades(self, clob_client) -> None:
         """Проверяет ТОЛЬКО открытые позиции каждые 30 минут и решает закрывать или нет.
         НЕ сканирует новые рынки!"""
@@ -281,10 +323,6 @@ class PortfolioManager:
                 return
             
             logger.info(f"[MONITOR 10min] Started checking {len(open_trades)} open trades...")
-            
-            # --- NEW: Batch Sync Prices once to avoid 429 later ---
-            unique_tokens = list(set([t.token_id for t in open_trades if t.token_id]))
-            self.get_current_prices(clob_client, unique_tokens)
             
             trades_sold = 0
             
@@ -306,56 +344,39 @@ class PortfolioManager:
                 for trade in open_trades:
                     mem_key = f"{trade.market_id}_{trade.token_id}"
                     mem = ai_memory.get(mem_key, {})
-                    old_edge = mem.get('edge', 0.0) # might not be saved directly, fallback calc
                     predicted_prob = mem.get('predicted_prob', None)
                     
                     if predicted_prob is None:
                         logger.debug(f"[MONITOR 10min] Skipping {trade.city} - no predicted_prob in memory.")
                         continue
                         
-                    # Calculate true starting edge manually in case it wasn't saved in json
+                    shares = trade.size_usd / trade.entry_price if trade.entry_price > 0 else 0
                     starting_edge = (predicted_prob - trade.entry_price) * 100 
 
-                    # Fetch live orderbook to compute spread and best bid
-                    try:
-                        ob = clob_client.get_order_book(trade.token_id)
-                        bids = getattr(ob, "bids", [])
-                        asks = getattr(ob, "asks", [])
-                        
-                        best_bid = 0.0
-                        if bids:
-                            # Use max() for bids (best sell price) and min() for asks (best buy price) 
-                            # regardless of how the SDK sorts the lists.
-                            best_bid = max([float(getattr(b, 'price', b.get('price', 0.0) if isinstance(b, dict) else 0.0)) for b in bids])
-                            
-                        best_ask = 1.0
-                        if asks:
-                            best_ask = min([float(getattr(a, 'price', a.get('price', 1.0) if isinstance(a, dict) else 1.0)) for a in asks])
-                    except Exception as e:
-                        logger.warning(f"[MONITOR 10min] Orderbook fetch failed for {trade.token_id}: {e}")
+                    # 1. SMART EXIT DEPTH: Calculate actual exit price
+                    exit_price, filled_sh, total_received = self._get_effective_exit_price(clob_client, trade.token_id, shares)
+                    
+                    if exit_price == 0:
+                        logger.debug(f"[MONITOR 10min] No liquidity to exit {trade.city}")
                         continue
 
                     # Rate limit relief
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
 
-                    if best_bid == 0.0:
-                        continue # No liquidity to exit
-                        
-                    spread = best_ask - best_bid
-                    if spread > 0.06:
-                        logger.debug(f"[MONITOR 10min] Spread too high ({spread*100:.1f}%) for {trade.city}. Skipping.")
-                        continue
-
-                    # Current best_bid is our exit price
-                    exit_price = best_bid
-                    shares = trade.size_usd / trade.entry_price if trade.entry_price > 0 else 0
-                    
-                    unrealized_pnl = (shares * exit_price) - trade.size_usd
+                    # Compute PnL and Edge with REAL exit price
+                    unrealized_pnl = total_received - trade.size_usd
                     unrealized_pnl_percent = (unrealized_pnl / trade.size_usd) * 100 if trade.size_usd > 0 else 0
-                    
                     new_edge = (predicted_prob - exit_price) * 100
                     
-                    # Fetch end date
+                    # Log depth evaluation
+                    # We compare against the actual best bid to show slippage in logs
+                    try:
+                        # (We can't easily get best_bid without extra call or parsing whole book again, 
+                        # so we'll just log the WAP)
+                        pass
+                    except: pass
+
+                    # Fetch end date to check Time Exit
                     hours_to_resolve = 999
                     try:
                         gamma_url = f"https://gamma-api.polymarket.com/markets?condition_id={trade.market_id}"
@@ -371,7 +392,7 @@ class PortfolioManager:
                     except:
                         pass
 
-                    # Fetch current thresholds from DB
+                    # Fetch current thresholds
                     tp_edge_limit = self.get_risk_setting("tp_edge", 10.0)
                     strong_tp_limit = self.get_risk_setting("strong_tp_pnl", 30.0)
                     sl_edge_limit = self.get_risk_setting("sl_edge", -12.0)
@@ -379,13 +400,10 @@ class PortfolioManager:
                     time_exit_limit = self.get_risk_setting("time_exit_h", 6.0)
 
                     exit_reason = None
-                    sell_shares = shares
-
-                    # Ensure Stop Loss limits are treated as negative (loss) thresholds
                     sl_edge_threshold = -abs(sl_edge_limit)
                     sl_pnl_threshold = -abs(sl_pnl_limit)
                     
-                    # PRIORITY ORDER: Stop Loss -> Target Reached -> Strong TP -> Normal TP -> Time Exit
+                    # DECISION LOGIC
                     if unrealized_pnl_percent <= sl_pnl_threshold:
                         exit_reason = "STOP_LOSS_PRICE"
                     elif new_edge <= sl_edge_threshold:
@@ -400,21 +418,15 @@ class PortfolioManager:
                         exit_reason = "TIME_EXIT"
 
                     if exit_reason:
-                        sell_shares = shares # Always 100% exit now
-                        
-                        if sell_shares <= 0:
-                            continue
-                            
-                        # Format Date/Temp
+                        # Format info strings
                         q_text = mem.get("question", "")
                         date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
                         temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
                         date_str = date_match.group(1) if date_match else "N/A"
                         temp_str = temp_match.group(1).strip() if temp_match else "N/A"
-                        
                         header_str = f"{trade.city} ({date_str}) [{temp_str}] {trade.outcome_name}"
 
-                        logger.info(f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason} SELL {sell_shares:.1f} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
+                        logger.info(f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason} SELL {shares:.2f} shares @ WAP {exit_price:.3f} (Entry: {trade.entry_price:.3f}) | PnL {unrealized_pnl:+.2f}$ ({unrealized_pnl_percent:+.1f}%)")
                         
                         if not config.dry_run:
                             try:
