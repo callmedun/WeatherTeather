@@ -432,13 +432,13 @@ class PortfolioManager:
                             try:
                                 order_args = OrderArgs(
                                     price=exit_price,
-                                    size=int(sell_shares),
+                                    size=shares,
                                     side="SELL",
                                     token_id=trade.token_id
                                 )
                                 resp = clob_client.create_and_post_order(order_args)
                                 if resp and resp.get("success"):
-                                    msg = f"🔔 <b>[MONITOR EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason}\n<b>Shares:</b> {sell_shares:.1f}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                                    msg = f"🔔 <b>[MONITOR EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason}\n<b>Shares:</b> {shares:.2f}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                                     await send_telegram_message(msg)
                                     
                                     # Update DB
@@ -461,7 +461,7 @@ class PortfolioManager:
                                 traceback.print_exc()
                         else:
                             # Dry run logging
-                            msg = f"🔔 <b>[DRY_RUN EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason}\n<b>Shares:</b> {sell_shares:.1f}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                            msg = f"🔔 <b>[DRY_RUN EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason}\n<b>Shares:</b> {shares:.2f}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                             await send_telegram_message(msg)
                             trade.status = "SOLD"
                             trade.resolved_at = datetime.utcnow()
