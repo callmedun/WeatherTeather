@@ -377,21 +377,25 @@ class PortfolioManager:
                     sl_edge_threshold = -abs(sl_edge_limit)
                     sl_pnl_threshold = -abs(sl_pnl_limit)
                     
-                    # PRIORITY ORDER: Stop Loss -> Strong TP -> Normal TP -> Time Exit
-                    if new_edge <= sl_edge_threshold or unrealized_pnl_percent <= sl_pnl_threshold:
-                        exit_reason = "stop_loss"
+                    # PRIORITY ORDER: Stop Loss -> Target Reached -> Strong TP -> Normal TP -> Time Exit
+                    if unrealized_pnl_percent <= sl_pnl_threshold:
+                        exit_reason = "STOP_LOSS_PRICE"
+                    elif new_edge <= sl_edge_threshold:
+                        exit_reason = "STOP_LOSS_EDGE"
+                    elif exit_price >= 0.98:
+                        exit_reason = "TARGET_REACHED"
                     elif unrealized_pnl_percent >= strong_tp_limit:
-                        exit_reason = "strong_take_profit"
-                        sell_shares = int(shares / 2) # Partial sell
+                        exit_reason = "TAKE_PROFIT_STRONG"
                     elif new_edge <= tp_edge_limit and unrealized_pnl_percent > 0:
-                        exit_reason = "take_profit"
+                        exit_reason = "TAKE_PROFIT_EDGE"
                     elif hours_to_resolve < time_exit_limit:
-                        exit_reason = "time_based"
+                        exit_reason = "TIME_EXIT"
 
-                    if exit_reason and sell_shares > 0:
-                        sell_shares = int(sell_shares)
-                        if sell_shares == 0:
-                            continue # Too small to partial sell
+                    if exit_reason:
+                        sell_shares = shares # Always 100% exit now
+                        
+                        if sell_shares <= 0:
+                            continue
                             
                         # Format Date/Temp
                         q_text = mem.get("question", "")
@@ -402,35 +406,31 @@ class PortfolioManager:
                         
                         header_str = f"{trade.city} ({date_str}) [{temp_str}] {trade.outcome_name}"
 
-                        logger.info(f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason.upper()} SELL {sell_shares} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
+                        logger.info(f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason} SELL {sell_shares:.1f} shares @ {exit_price} (Entry: {trade.entry_price}) | PnL {unrealized_pnl:+.2f}$")
                         
                         if not config.dry_run:
                             try:
                                 order_args = OrderArgs(
                                     price=exit_price,
-                                    size=sell_shares,
+                                    size=int(sell_shares),
                                     side="SELL",
                                     token_id=trade.token_id
                                 )
                                 resp = clob_client.create_and_post_order(order_args)
                                 if resp and resp.get("success"):
-                                    msg = f"🔔 <b>[MONITOR 30min EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Shares:</b> {sell_shares}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                                    msg = f"🔔 <b>[MONITOR EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason}\n<b>Shares:</b> {sell_shares:.1f}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                                     await send_telegram_message(msg)
                                     
                                     # Update DB
-                                    if sell_shares >= int(shares):
-                                        trade.status = "SOLD"
-                                        trade.resolved_at = datetime.utcnow()
-                                        from src.calibration import calibration_engine
-                                        calibration_engine.mark_trade_closed(
-                                            trade.token_id, 
-                                            actual_outcome=None, 
-                                            exit_price=exit_price, 
-                                            realized_pnl=unrealized_pnl
-                                        )
-                                    else:
-                                        # Reduce size
-                                        trade.size_usd -= (sell_shares * trade.entry_price)
+                                    trade.status = "SOLD"
+                                    trade.resolved_at = datetime.utcnow()
+                                    from src.calibration import calibration_engine
+                                    calibration_engine.mark_trade_closed(
+                                        trade.token_id, 
+                                        actual_outcome=None, 
+                                        exit_price=exit_price, 
+                                        realized_pnl=unrealized_pnl
+                                    )
                                         
                                     session.commit()
                                     trades_sold += 1
@@ -441,18 +441,17 @@ class PortfolioManager:
                                 traceback.print_exc()
                         else:
                             # Dry run logging
-                            msg = f"🔔 <b>[DRY_RUN EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason.upper()}\n<b>Shares:</b> {sell_shares}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                            msg = f"🔔 <b>[DRY_RUN EXIT]</b>\n<b>Market:</b> {header_str}\n<b>Reason:</b> {exit_reason}\n<b>Shares:</b> {sell_shares:.1f}\n<b>Entry Price:</b> {trade.entry_price}\n<b>Exit Price:</b> {exit_price}\n<b>PnL:</b> {unrealized_pnl:+.2f}$"
                             await send_telegram_message(msg)
-                            if sell_shares >= int(shares):
-                                        trade.status = "SOLD"
-                                        trade.resolved_at = datetime.utcnow()
-                                        from src.calibration import calibration_engine
-                                        calibration_engine.mark_trade_closed(
-                                            trade.token_id, 
-                                            actual_outcome=None, 
-                                            exit_price=exit_price, 
-                                            realized_pnl=unrealized_pnl
-                                        )
+                            trade.status = "SOLD"
+                            trade.resolved_at = datetime.utcnow()
+                            from src.calibration import calibration_engine
+                            calibration_engine.mark_trade_closed(
+                                trade.token_id, 
+                                actual_outcome=None, 
+                                exit_price=exit_price, 
+                                realized_pnl=unrealized_pnl
+                            )
                             session.commit()
                             trades_sold += 1
                 

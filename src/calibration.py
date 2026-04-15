@@ -251,14 +251,15 @@ class SelfCalibration:
                 if not line.strip(): continue
                 r = json.loads(line)
                 if r.get("status") == "closed":
-                    outcome_icon = "✅" if r.get("actual_outcome") is True else "❌"
-                    # If it was an early exit, it might not have actual_outcome set but has realized_pnl
+                    # Calculate PnL first to determine the icon
                     if r.get("realized_pnl") is not None:
-                        pnl = r["realized_pnl"]
+                        pnl = float(r["realized_pnl"])
                     else:
                         size = r.get('size_usd', 0)
                         price = r.get('price_at_buy', 1.0)
                         pnl = ((size / price) - size) if r.get("actual_outcome") is True else -size
+                    
+                    outcome_icon = "✅" if pnl > 0 else "❌"
                     
                     # Extract Date and Temperature (re-use logic)
                     q_text = r.get("question", "")
