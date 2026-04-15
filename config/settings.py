@@ -52,14 +52,22 @@ class Settings(BaseSettings):
     
     # City-ICAO Mapping for Weather
     city_icao_mapping: Dict[str, str] = {
-        "London": "EGLL",
-        "Seoul": "RKSS",
+        "London": "EGLC",
+        "Seoul": "RKSI",
         "Chicago": "KORD",
-        "Dallas": "KDFW",
+        "Dallas": "KDAL",
         "Atlanta": "KATL",
         "Tokyo": "RJTT",
-        "Shanghai": "ZSSS",
-        "Singapore": "WSSS"
+        "Shanghai": "ZSPD",
+        "Singapore": "WSSS",
+        "Paris": "LFPG",
+        "New York": "KLGA",
+        "Los Angeles": "KLAX",
+        "Hong Kong": "VHHH",
+        "Madrid": "LEMD",
+        "Toronto": "CYYZ",
+        "Miami": "KMIA",
+        "Houston": "KHOU"
     }
 
     class Config:
