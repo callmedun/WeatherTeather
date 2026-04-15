@@ -228,7 +228,7 @@ class SelfCalibration:
             temp_str = temp_match.group(1).strip() if temp_match else "N/A"
             
             lines.append(f"• {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']}\n"
-                         f"  ↳ Вход: {shares:.1f} shares @ {entry_price:.3f}\n"
+                         f"  ↳ Вход: {shares:.2f} shares @ {entry_price:.3f}\n"
                          f"  ↳ PnL: {pnl_str} {market_str}\n")
             if current_price is not None:
                 total_unrealized_pnl += pnl
@@ -269,7 +269,7 @@ class SelfCalibration:
                     temp_str = temp_match.group(1).strip() if temp_match else "N/A"
 
                     lines.append(f"{outcome_icon} {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']} | PnL: {pnl:+.2f}$\n"
-                                 f"  ↳ Вход: ${r.get('size_usd',0):.2f} @ {r.get('price_at_buy',0):.3f} | AI: {r.get('predicted_prob',0):.2f}")
+                                 f"  ↳ Вход: {r.get('size_usd',0):.2f}$ ({r.get('size_usd',0)/r.get('price_at_buy',1):.2f} sh) @ {r.get('price_at_buy',0):.3f}")
         
         if not lines:
             return "📜 История пуста."

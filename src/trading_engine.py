@@ -131,7 +131,7 @@ class TradingEngine:
             logger.info(f"Scaledown successful. Reduced size to ${intended_size:.2f} @ {eff_price:.3f}")
 
         # 4. Finalize execution params
-        shares = int(max(config.min_shares, round(eff_shares)))
+        shares = round(max(config.min_shares, eff_shares), 2)
         final_cost = round(float(shares * eff_price), config.max_decimals_amount)
         profit_percent = round(((shares - final_cost) / final_cost) * 100, 2) if final_cost > 0 else 0
         
