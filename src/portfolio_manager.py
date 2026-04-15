@@ -218,16 +218,22 @@ class PortfolioManager:
         session = self.Session()
         try:
             defaults = {
-                "tp_edge": 10.0,         # Take Profit Edge (10%)
+                "tp_edge": 5.0,         # Take Profit Edge (5%)
                 "strong_tp_pnl": 30.0,   # Strong PnL TP (30%)
                 "sl_edge": -12.0,        # Stop Loss Edge (-12%)
-                "sl_pnl": -15.0,         # Stop Loss PnL (-15%)
+                "sl_pnl": -30.0,         # Stop Loss PnL (-30%)
                 "time_exit_h": 6.0       # Time-based exit (6 hours)
             }
             for k, v in defaults.items():
                 existing = session.query(RiskSetting).filter_by(key=k).first()
                 if not existing:
                     session.add(RiskSetting(key=k, value=v))
+                else:
+                    # Auto-migration of old defaults to new standards
+                    if k == "tp_edge" and existing.value == 10.0:
+                        existing.value = v
+                    elif k == "sl_pnl" and existing.value == -15.0:
+                        existing.value = v
             session.commit()
         except Exception as e:
             logger.error(f"Failed to init risk settings: {e}")
