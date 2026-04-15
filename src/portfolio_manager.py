@@ -324,6 +324,8 @@ class PortfolioManager:
                         
                         best_bid = 0.0
                         if bids:
+                            # Use max() for bids (best sell price) and min() for asks (best buy price) 
+                            # regardless of how the SDK sorts the lists.
                             best_bid = max([float(getattr(b, 'price', b.get('price', 0.0) if isinstance(b, dict) else 0.0)) for b in bids])
                             
                         best_ask = 1.0

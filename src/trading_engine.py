@@ -46,9 +46,11 @@ class TradingEngine:
             total_cost = 0.0
             total_shares = 0.0
             
-            # Asks are usually sorted by price ascending
-            logger.info(f"Analyzing depth for ${target_usd:.2f}...")
-            for ask in asks:
+            # SDK might return asks in any order (often descending). We need ASCENDING for buying.
+            sorted_asks = sorted(asks, key=lambda x: float(getattr(x, 'price', 0.0)))
+            
+            logger.info(f"Analyzing depth (Ascending) for ${target_usd:.2f}...")
+            for ask in sorted_asks:
                 p = float(getattr(ask, 'price', 0.0))
                 s = float(getattr(ask, 'size', 0.0))
                 
