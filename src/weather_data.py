@@ -36,22 +36,22 @@ class WeatherFetcher:
 
     async def fetch_weather_for_icao(self, icao_codes: List[str]) -> Optional[Dict[str, Dict[str, Any]]]:
         """
-        Fetches METAR and TAF data with 3 retries and optimized batching/chunking.
-        - METAR: Fetched in one batch (without historical 'hours' to prevent 502).
-        - TAF: Fetched in small chunks of 5 to prevent server timeouts/502.
+        Fetches METAR and TAF data for a list of ICAO codes with 3 retries.
+        - METAR: Restored 'hours=24' for full 24h context.
+        - TAF: Fetched in one batch for speed (site issues resolved).
         """
         import asyncio
+        ids_str = ",".join(icao_codes)
         results = {code: {"metar": [], "taf": [], "last_updated": time.time()} for code in icao_codes}
         
-        # 1. Fetch METAR (One optimized batch)
-        ids_str = ",".join(icao_codes)
+        # 1. Fetch METAR (Up to 3 attempts)
         metar_success = False
         for attempt in range(1, 4):
             try:
                 async with httpx.AsyncClient() as client:
-                    # REMOVED &hours=24 as it causes 502 on large batches
+                    # Restored &hours=24 for deeper AI context
                     res_metar = await client.get(
-                        f"{self.base_url_metar}?ids={ids_str}&format=json", 
+                        f"{self.base_url_metar}?ids={ids_str}&format=json&hours=24", 
                         timeout=25.0
                     )
                     res_metar.raise_for_status()
@@ -68,59 +68,49 @@ class WeatherFetcher:
                         metar_success = True
                         break
                     else:
-                        logger.warning(f"[WEATHER] METAR empty response (Attempt {attempt})")
+                        logger.warning(f"[WEATHER] METAR empty response for {ids_str} (Attempt {attempt})")
             except Exception as e:
                 logger.error(f"[WEATHER] METAR fetch error (Attempt {attempt}): {e}")
             
             if attempt < 3:
-                await asyncio.sleep(attempt * 4)
+                await asyncio.sleep(attempt * 5)
         
         if not metar_success:
-            logger.error("[CRITICAL] Failed to fetch METAR after 3 attempts.")
+            logger.error(f"[CRITICAL] Failed to fetch METAR after 3 attempts for {ids_str}")
             return None
 
-        # 2. Fetch TAF (CHUNKED batches of 5 to prevent 502)
-        chunk_size = 5
-        icao_chunks = [icao_codes[i:i + chunk_size] for i in range(0, len(icao_codes), chunk_size)]
-        
-        all_taf_success = True
-        for chunk in icao_chunks:
-            chunk_str = ",".join(chunk)
-            chunk_success = False
-            for attempt in range(1, 4):
-                try:
-                    async with httpx.AsyncClient() as client:
-                        res_taf = await client.get(
-                            f"{self.base_url_taf}?ids={chunk_str}&format=json", 
-                            timeout=25.0
-                        )
-                        res_taf.raise_for_status()
-                        taf_data = res_taf.json()
-                        
-                        found_in_chunk = False
-                        for item in taf_data:
-                            icao = item.get("icaoId")
-                            if icao in results:
-                                results[icao]["taf"].append(item)
-                                found_in_chunk = True
-                        
-                        if found_in_chunk:
-                            chunk_success = True
-                            break
-                        else:
-                            logger.warning(f"[WEATHER] TAF empty chunk {chunk_str} (Attempt {attempt})")
-                except Exception as e:
-                    logger.error(f"[WEATHER] TAF fetch error chunk {chunk_str} (Attempt {attempt}): {e}")
-                
-                if attempt < 3:
-                    await asyncio.sleep(attempt * 3)
+        # 2. Fetch TAF (Up to 3 attempts - Batch mode restored)
+        taf_success = False
+        for attempt in range(1, 4):
+            try:
+                async with httpx.AsyncClient() as client:
+                    res_taf = await client.get(
+                        f"{self.base_url_taf}?ids={ids_str}&format=json", 
+                        timeout=25.0
+                    )
+                    res_taf.raise_for_status()
+                    taf_data = res_taf.json()
+                    
+                    found_any = False
+                    for item in taf_data:
+                        icao = item.get("icaoId")
+                        if icao in results:
+                            results[icao]["taf"].append(item)
+                            found_any = True
+                    
+                    if found_any:
+                        taf_success = True
+                        break
+                    else:
+                        logger.warning(f"[WEATHER] TAF empty response for {ids_str} (Attempt {attempt})")
+            except Exception as e:
+                logger.error(f"[WEATHER] TAF fetch error (Attempt {attempt}): {e}")
             
-            if not chunk_success:
-                logger.error(f"[CRITICAL] Failed to fetch TAF chunk {chunk_str} after retries.")
-                all_taf_success = False
-                break # If one chunk fails completely, we fail the entire cycle as per requirement
+            if attempt < 3:
+                await asyncio.sleep(attempt * 5)
 
-        if not all_taf_success:
+        if not taf_success:
+            logger.error(f"[CRITICAL] Failed to fetch TAF after 3 attempts for {ids_str}")
             return None
 
         # Update cache for successful results
