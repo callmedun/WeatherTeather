@@ -420,8 +420,23 @@ class SelfCalibration:
         
         try:
             from src.portfolio_manager import TradePosition
-            closed_trades = session.query(TradePosition).filter_by(status="SOLD").all()
-            total_realized_pnl = sum([t.realized_pnl for t in closed_trades if t.realized_pnl is not None])
+            
+            total_realized_pnl = 0.0
+            if os.path.exists(self.filename):
+                with open(self.filename, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if not line.strip(): continue
+                        try:
+                            r = json.loads(line)
+                            if r.get("status") == "closed":
+                                if r.get("realized_pnl") is not None:
+                                    total_realized_pnl += float(r["realized_pnl"])
+                                else:
+                                    size = r.get('size_usd', 0)
+                                    price = r.get('price_at_buy', 1.0)
+                                    pnl = ((size / price) - size) if r.get("actual_outcome") is True else -float(size)
+                                    total_realized_pnl += pnl
+                        except: pass
             
             open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
             total_exposure = sum([t.size_usd for t in open_trades])
