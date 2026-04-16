@@ -153,6 +153,24 @@ class SelfCalibration:
                 for r in records:
                     f.write(json.dumps(r) + "\n")
 
+    def update_prediction_prob(self, token_id: str, new_prob: float):
+        if not os.path.exists(self.filename) or new_prob is None:
+            return
+        records = []
+        updated = False
+        with open(self.filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip(): continue
+                r = json.loads(line)
+                if r.get("token_id") == token_id and r.get("status") == "open":
+                    r["predicted_prob"] = new_prob
+                    updated = True
+                records.append(r)
+        if updated:
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                for r in records:
+                    f.write(json.dumps(r) + "\n")
+
     def calculate_calibration_factor(self, city: str) -> float:
         """
         Calculates the historical accuracy factor for a given city to adjust AI confidence natively.
@@ -200,14 +218,18 @@ class SelfCalibration:
         count = 0
         total_unrealized_pnl = 0.0
         
-        # Read all records
-        records = []
+        # Read all records, deduplicating by token_id (keep highest size in case of corruption)
+        records_dict = {}
         with open(self.filename, 'r', encoding='utf-8') as f:
             for line in f:
                 if not line.strip(): continue
                 r = json.loads(line)
                 if r.get("status") == "open":
-                    records.append(r)
+                    t_id = r.get("token_id")
+                    if t_id not in records_dict or r.get("size_usd", 0) > records_dict[t_id].get("size_usd", 0):
+                        records_dict[t_id] = r
+                        
+        records = list(records_dict.values())
                     
         if not records:
             return "📁 Нет активных сделок."

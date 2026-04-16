@@ -392,10 +392,20 @@ class PortfolioManager:
                             "city": city,
                             "outcomes": []
                         }
+                    
+                    curr_price = self.get_current_price(clob_client, t.token_id)
+                    curr_price = curr_price if curr_price is not None else 0.5
+                    
                     city_markets_dict[t.market_id]["outcomes"].append({
                         "name": t.outcome_name, 
                         "token_id": t.token_id, 
-                        "current_price": 0.0
+                        "current_price": curr_price
+                    })
+                    alt_name = "No" if t.outcome_name.lower() == "yes" else "Yes"
+                    city_markets_dict[t.market_id]["outcomes"].append({
+                        "name": alt_name,
+                        "token_id": "dummy_" + alt_name,
+                        "current_price": max(0.01, 1.0 - curr_price)
                     })
                 
                 city_markets_for_ai = list(city_markets_dict.values())
@@ -425,8 +435,8 @@ class PortfolioManager:
                                 else:
                                     logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: [Нет старого] ➔ {new_prob*100:.1f}%")
                             
-                            # Save to history file (updates latest state)
-                            calibration_engine.save_prediction(matching_sig)
+                            # Update probability for open trade in history
+                            calibration_engine.update_prediction_prob(t.token_id, new_prob)
                             # Update local dict for current loop
                             ai_memory[mem_key] = matching_sig
 
