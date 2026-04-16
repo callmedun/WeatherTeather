@@ -1,6 +1,6 @@
 import httpx
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from src.utils import logger
 
 # Hardcoded coordinates mapping for precise Open-Meteo queries based on config standard
