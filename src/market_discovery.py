@@ -28,10 +28,6 @@ class MarketDiscoverer:
         target_cities = list(config.city_icao_mapping.keys())
         logger.info(f"Scanning Polymarket for weather markets across {len(target_cities)} cities (Horizon: {config.scan_days_ahead} days)...")
         
-        active_market_ids = set(portfolio_manager.get_active_market_ids())
-        if active_market_ids:
-            logger.info(f"Loaded {len(active_market_ids)} open market IDs. Will skip processing to prevent overlapping trades.")
-        
         async with httpx.AsyncClient() as client:
             # We'll reasonably bound the search to recent active markets to avoid huge overhead
             while has_more:
@@ -72,9 +68,6 @@ class MarketDiscoverer:
                                 if matched_city:
                                     market_info = self._parse_market(market, matched_city, title)
                                     if market_info:
-                                        if market_info["market_id"] in active_market_ids:
-                                            # Skip to prevent duplicates
-                                            continue
                                         markets.append(market_info)
 
                     offset += limit

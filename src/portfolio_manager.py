@@ -309,11 +309,15 @@ class PortfolioManager:
             return 0.0, 0.0, 0.0
 
     async def monitor_open_trades(self, clob_client) -> None:
-        """Проверяет ТОЛЬКО открытые позиции каждые 30 минут и решает закрывать или нет.
-        НЕ сканирует новые рынки!"""
+        """Проверяет ТОЛЬКО открытые позиции каждые 10 минут и решает закрывать или нет.
+        ТЕПЕРЬ: Сначала перепроверяет погоду через ИИ для всех открытых позиций!"""
         if not clob_client:
             logger.warning("[MONITOR 10min] clob_client is None. Skipping.")
             return
+
+        from src.weather_data import weather_fetcher
+        from src.ai_analyzer import ai_analyzer
+        from src.calibration import calibration_engine
 
         session = self.Session()
         try:
@@ -322,11 +326,9 @@ class PortfolioManager:
                 logger.info("[MONITOR 10min] No open trades to monitor.")
                 return
             
-            logger.info(f"[MONITOR 10min] Started checking {len(open_trades)} open trades...")
+            logger.info(f"[MONITOR 10min] Started full re-analysis for {len(open_trades)} open trades...")
             
-            trades_sold = 0
-            
-            # Load AI prediction memory
+            # 1. Load current AI memory (to get context: questions, target city etc)
             ai_memory = {}
             mem_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "historical_predictions.jsonl")
             if os.path.exists(mem_path):
@@ -337,9 +339,71 @@ class PortfolioManager:
                             r = json.loads(line)
                             key = f"{r.get('market_id')}_{r.get('token_id')}"
                             ai_memory[key] = r
-                        except:
-                            pass
+                        except: pass
 
+            # 2. GROUP TRADES BY CITY for efficient bulk weather & AI calls
+            city_groups = {}
+            for t in open_trades:
+                if t.city not in city_groups: city_groups[t.city] = []
+                city_groups[t.city].append(t)
+            
+            # 3. BULK AI RE-ANALYSIS
+            icao_codes = list(set([config.city_icao_mapping.get(city) for city in city_groups.keys() if config.city_icao_mapping.get(city)]))
+            weather_data_map = {}
+            if icao_codes:
+                weather_data_map = await weather_fetcher.fetch_weather_for_icao(icao_codes)
+                # Supplement with OpenMeteo
+                for icao in icao_codes:
+                    try:
+                        om_data = await weather_fetcher.fetch_open_meteo(icao)
+                        if icao in weather_data_map:
+                            weather_data_map[icao].update(om_data)
+                    except: pass
+
+            # Re-analyze each city
+            for city, trades in city_groups.items():
+                icao = config.city_icao_mapping.get(city)
+                w_data = weather_data_map.get(icao)
+                if not w_data:
+                    logger.warning(f"[MONITOR] No weather for {city}, skipping re-analysis.")
+                    continue
+                
+                # Construct "market" objects for AI analyzer from memory
+                city_markets_for_ai = []
+                for t in trades:
+                    mem_key = f"{t.market_id}_{t.token_id}"
+                    mem = ai_memory.get(mem_key)
+                    if not mem:
+                        # If missing in local memory, try to find it in other positions of the same market
+                        # or skip for now (we really need the Question text)
+                        logger.debug(f"[MONITOR] Missing metadata for {t.city} {t.token_id}. Skipping re-analysis.")
+                        continue
+                        
+                    # Reconstruct market info for AI
+                    city_markets_for_ai.append({
+                        "market_id": t.market_id,
+                        "question": mem.get("question"),
+                        "event_title": mem.get("event_title"),
+                        "city": city,
+                        "outcomes": mem.get("outcomes", []) # contains token_ids needed for mapping
+                    })
+
+                if city_markets_for_ai:
+                    logger.info(f"[MONITOR] [{city}] Re-analyzing {len(city_markets_for_ai)} markets with fresh weather...")
+                    fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets_for_ai, w_data)
+                    
+                    # Update memory with fresh probs
+                    for sig in fresh_signals:
+                        m_id = sig["market_id"]
+                        t_id = sig["token_id"]
+                        # Save to history file (updates latest state)
+                        calibration_engine.save_prediction(sig)
+                        # Update local dict for current loop
+                        key = f"{m_id}_{t_id}"
+                        ai_memory[key] = sig
+
+            # 4. DECISION LOOP (Now with fresh probs)
+            trades_sold = 0
             async with httpx.AsyncClient() as http_client:
                 for trade in open_trades:
                     mem_key = f"{trade.market_id}_{trade.token_id}"
@@ -347,7 +411,7 @@ class PortfolioManager:
                     predicted_prob = mem.get('predicted_prob', None)
                     
                     if predicted_prob is None:
-                        logger.debug(f"[MONITOR 10min] Skipping {trade.city} - no predicted_prob in memory.")
+                        logger.debug(f"[MONITOR 10min] Skipping {trade.city} - still no predicted_prob.")
                         continue
                         
                     shares = trade.size_usd / trade.entry_price if trade.entry_price > 0 else 0

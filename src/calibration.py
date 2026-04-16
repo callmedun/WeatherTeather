@@ -19,27 +19,52 @@ class SelfCalibration:
             with open(self.filename, 'w', encoding='utf-8') as f:
                 pass
                 
-    def save_prediction(self, market_id: str, outcome_token_id: str, city: str, icao: str, question: str, 
-                        predicted_prob: float, bought_outcome: str, price_at_buy: float, ev: float = 0.0, size_usd: float = 0.0):
+    def save_prediction(self, *args, **kwargs):
+        """
+        Saves a prediction record. 
+        Can be called with a single dictionary 'sig' or with full positional arguments.
+        """
         try:
-            record = {
-                "market_id": market_id,
-                "token_id": outcome_token_id,
-                "city": city,
-                "icao": icao,
-                "question": question,
-                "predicted_prob": predicted_prob,
-                "ev": ev,
-                "bought_outcome": bought_outcome,
-                "price_at_buy": price_at_buy,
-                "size_usd": size_usd,
-                "timestamp": datetime.utcnow().isoformat(),
-                "status": "open",
-                "actual_outcome": None
-            }
+            if len(args) == 1 and isinstance(args[0], dict):
+                sig = args[0]
+                record = {
+                    "market_id": sig.get("market_id"),
+                    "token_id": sig.get("token_id"),
+                    "city": sig.get("city"),
+                    "icao": sig.get("icao_code", sig.get("icao", "")),
+                    "question": sig.get("question", ""),
+                    "predicted_prob": sig.get("predicted_prob", 0.0),
+                    "ev": sig.get("ev", 0.0),
+                    "bought_outcome": sig.get("outcome_slug", sig.get("bought_outcome", "")),
+                    "price_at_buy": sig.get("eff_price", sig.get("price_at_buy", 0.0)),
+                    "size_usd": sig.get("final_cost", sig.get("size_usd", 0.0)),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "status": sig.get("status", "open"),
+                    "actual_outcome": sig.get("actual_outcome", None),
+                    "outcomes": sig.get("outcomes", [])
+                }
+            else:
+                # Fallback to positional (keeping original order for compatibility)
+                # market_id, outcome_token_id, city, icao, question, predicted_prob, bought_outcome, price_at_buy, ev, size_usd
+                record = {
+                    "market_id": args[0] if len(args) > 0 else kwargs.get("market_id"),
+                    "token_id": args[1] if len(args) > 1 else kwargs.get("outcome_token_id"),
+                    "city": args[2] if len(args) > 2 else kwargs.get("city"),
+                    "icao": args[3] if len(args) > 3 else kwargs.get("icao"),
+                    "question": args[4] if len(args) > 4 else kwargs.get("question"),
+                    "predicted_prob": args[5] if len(args) > 5 else kwargs.get("predicted_prob"),
+                    "bought_outcome": args[6] if len(args) > 6 else kwargs.get("bought_outcome"),
+                    "price_at_buy": args[7] if len(args) > 7 else kwargs.get("price_at_buy"),
+                    "ev": args[8] if len(args) > 8 else kwargs.get("ev", 0.0),
+                    "size_usd": args[9] if len(args) > 9 else kwargs.get("size_usd", 0.0),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "status": "open",
+                    "actual_outcome": None
+                }
+            
             with open(self.filename, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(record) + "\n")
-            logger.info(f"Recorded prediction for {city} (Market: {market_id})")
+            logger.info(f"Recorded prediction update for {record['city']} (Market: {record['market_id']})")
         except Exception as e:
             logger.error(f"Failed to save prediction: {e}")
 

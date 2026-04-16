@@ -94,6 +94,8 @@ class BotScheduler:
                     if len(open_trades) + len(trades_to_execute) >= 2:
                         break
                     if sig["token_id"] in open_tokens:
+                        # Update prediction memory but skip buying
+                        calibration_engine.save_prediction(sig)
                         continue
                     if sig["sentiment"] in open_sentiments and sig["sentiment"] != "NEUTRAL":
                         continue
