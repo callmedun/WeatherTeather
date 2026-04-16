@@ -9,7 +9,8 @@ from src.utils import logger
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ["📂 Открытые сделки", "📜 Закрытые сделки"],
-        ["📊 Статистика", "⚙️ Риски"],
+        ["💰 Баланс", "📊 Статистика"],
+        ["⚙️ Статус", "⚙️ Риски"],
         ["▶️ Старт Бот", "⏸ Пауза Бот"],
         ["🛑 Закрыть все сделки"]
     ]
@@ -26,9 +27,17 @@ async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text_cmd == "📜 Закрытые сделки":
             text = calibration_engine.get_closed_trades()
             await update.message.reply_text(text)
+        elif text_cmd == "💰 Баланс":
+            client = trading_engine.client
+            text = calibration_engine.get_balance_summary(client)
+            await update.message.reply_text(text)
         elif text_cmd == "📊 Статистика":
             client = trading_engine.client
             text = calibration_engine.get_portfolio_stats(client)
+            await update.message.reply_text(text)
+        elif text_cmd == "⚙️ Статус":
+            from src.scheduler import bot_scheduler
+            text = bot_scheduler.get_system_status()
             await update.message.reply_text(text)
         elif text_cmd == "⚙️ Риски":
             text = calibration_engine.get_risk_summary()

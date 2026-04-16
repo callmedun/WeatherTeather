@@ -234,7 +234,8 @@ class SelfCalibration:
                 predicted_prob = r.get('predicted_prob')
                 if predicted_prob is not None:
                     new_edge = (predicted_prob - current_price) * 100
-                    edge_str = f"| Edge: {new_edge:+.1f}%"
+                    ai_prob_pct = predicted_prob * 100
+                    edge_str = f"| Edge: {new_edge:+.1f}% | AI: {ai_prob_pct:.1f}%"
                 else:
                     edge_str = ""
                     
@@ -387,6 +388,56 @@ class SelfCalibration:
             f"🎲 Всего сделок: {total_trades}\n"
             f"🧠 Средний EV входа: {avg_ev:+.3f}\n"
         )
+
+    def get_balance_summary(self, clob_client=None) -> str:
+        """Returns account balance summary for Live and Dry Run modes."""
+        base_dry_run_balance = 1000.0
+        
+        from src.portfolio_manager import portfolio_manager
+        session = portfolio_manager.Session()
+        
+        try:
+            from src.portfolio_manager import TradePosition
+            closed_trades = session.query(TradePosition).filter_by(status="SOLD").all()
+            total_realized_pnl = sum([t.realized_pnl for t in closed_trades if t.realized_pnl is not None])
+            
+            open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
+            total_exposure = sum([t.size_usd for t in open_trades])
+            
+            if config.dry_run:
+                current_balance = base_dry_run_balance + total_realized_pnl
+                free_cash = current_balance - total_exposure
+                return (
+                    f"💰 Виртуальный Баланс (DRY RUN):\n\n"
+                    f"💳 Всего на счету: {current_balance:.2f} $\n"
+                    f"🧊 Заморожено в сделках: {total_exposure:.2f} $\n"
+                    f"💵 Свободный кэш: {free_cash:.2f} $\n\n"
+                    f"📈 Общий PnL (закр.): {total_realized_pnl:+.2f} $"
+                )
+            else:
+                balance_str = "Ошибка получения"
+                free_cash_str = "Ошибка получения"
+                if clob_client is not None:
+                    try:
+                        bal = clob_client.get_balance_allowance(asset_type="COLLATERAL")
+                        if isinstance(bal, dict) and 'balance' in bal:
+                            free_cash_str = f"{float(bal['balance']):.2f} $"
+                            current_balance = float(bal['balance']) + total_exposure
+                            balance_str = f"{current_balance:.2f} $"
+                    except: pass
+                
+                return (
+                    f"💰 Реальный Баланс (LIVE):\n\n"
+                    f"💳 Оценочный эквити: ~{balance_str}\n"
+                    f"🧊 В открытых позициях: {total_exposure:.2f} $\n"
+                    f"💵 Доступно (USDC): {free_cash_str}\n\n"
+                    f"📈 Зафиксированный PnL бота: {total_realized_pnl:+.2f} $"
+                )
+        except Exception as e:
+            logger.error(f"Error calculating balance summary: {e}")
+            return "Ошибка при расчете баланса."
+        finally:
+            session.close()
 
 # Singleton
 calibration_engine = SelfCalibration()

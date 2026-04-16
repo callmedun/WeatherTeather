@@ -18,6 +18,26 @@ class BotScheduler:
         self.scheduler = AsyncIOScheduler()
         self.discoverer = MarketDiscoverer()
         self.city_lock = asyncio.Lock() # For thread-safe traded_cities access
+        self.last_scan_time = None
+        self.last_monitor_time = None
+        
+    def get_system_status(self) -> str:
+        """Generates a text report about bot health and scheduling."""
+        mode_str = "DRY RUN (виртуальный баланс)" if config.dry_run else "LIVE (реальный баланс!)"
+        pause_str = "⏸ ПАУЗА (новые рынки не ищутся)" if config.is_paused else "▶️ АКТИВЕН"
+        
+        def fmt_time(dt_obj):
+            if dt_obj is None: return "Еще не запускался"
+            return dt_obj.strftime("%Y-%m-%d %H:%M:%S UTC")
+            
+        return (
+            f"⚙️ СТАТУС БОТА:\n\n"
+            f"Режим: {mode_str}\n"
+            f"Состояние: {pause_str}\n\n"
+            f"Ошибки ИИ (подряд): {ai_analyzer.consecutive_failures}\n\n"
+            f"⏱ Последний часовой скан:\n{fmt_time(self.last_scan_time)}\n\n"
+            f"⏱ Последний 10-мин мониторинг:\n{fmt_time(self.last_monitor_time)}"
+        )
 
     async def scan_and_trade(self):
         if config.is_paused:
@@ -130,6 +150,8 @@ class BotScheduler:
             logger.error(f"Error during scan cycle: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            self.last_scan_time = datetime.utcnow()
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here
@@ -193,5 +215,6 @@ class BotScheduler:
         from src.portfolio_manager import portfolio_manager
         logger.info("[SCHEDULER] Running scheduled 10-minute open trades monitor...")
         await portfolio_manager.monitor_open_trades(clob_client=trading_engine.client)
+        self.last_monitor_time = datetime.utcnow()
 
 bot_scheduler = BotScheduler()
