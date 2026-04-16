@@ -375,26 +375,30 @@ class PortfolioManager:
                     logger.warning(f"[MONITOR] No weather for {city}, skipping re-analysis.")
                     continue
                 
-                # Construct "market" objects for AI analyzer from memory
-                city_markets_for_ai = []
+                # Construct "market" objects for AI analyzer from memory, grouped by market_id
+                city_markets_dict = {}
                 for t in trades:
                     mem_key = f"{t.market_id}_{t.token_id}"
                     mem = ai_memory.get(mem_key)
                     if not mem:
-                        # If missing in local memory, try to find it in other positions of the same market
-                        # or skip for now (we really need the Question text)
                         logger.debug(f"[MONITOR] Missing metadata for {t.city} {t.token_id}. Skipping re-analysis.")
                         continue
                         
-                    # Reconstruct market info for AI
-                    city_markets_for_ai.append({
-                        "market_id": t.market_id,
-                        "question": mem.get("question"),
-                        "event_title": mem.get("event_title"),
-                        "city": city,
-                        "outcomes": mem.get("outcomes", []) # contains token_ids needed for mapping
+                    if t.market_id not in city_markets_dict:
+                        city_markets_dict[t.market_id] = {
+                            "market_id": t.market_id,
+                            "question": mem.get("question"),
+                            "event_title": mem.get("event_title"),
+                            "city": city,
+                            "outcomes": []
+                        }
+                    city_markets_dict[t.market_id]["outcomes"].append({
+                        "name": t.outcome_name, 
+                        "token_id": t.token_id, 
+                        "current_price": 0.0
                     })
-
+                
+                city_markets_for_ai = list(city_markets_dict.values())
                 if city_markets_for_ai:
                     logger.info(f"[MONITOR] [{city}] Re-analyzing {len(city_markets_for_ai)} markets with fresh weather...")
                     fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets_for_ai, w_data, return_all=True)
