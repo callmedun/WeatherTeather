@@ -351,14 +351,21 @@ class PortfolioManager:
             icao_codes = list(set([config.city_icao_mapping.get(city) for city in city_groups.keys() if config.city_icao_mapping.get(city)]))
             weather_data_map = {}
             if icao_codes:
+                logger.info(f"[MONITOR] Fetching weather for {len(icao_codes)} stations (with retries)...")
                 weather_data_map = await weather_fetcher.fetch_weather_for_icao(icao_codes)
-                # Supplement with OpenMeteo
-                for icao in icao_codes:
-                    try:
-                        om_data = await weather_fetcher.fetch_open_meteo(icao)
-                        if icao in weather_data_map:
-                            weather_data_map[icao].update(om_data)
-                    except: pass
+                
+                if weather_data_map is None:
+                    logger.warning("[MONITOR] [SAFETY ABORT] Missing METAR/TAF after retries. Skipping AI re-analysis for this 10m cycle.")
+                    # We don't return here because we might still want to check basic Stop-Loss-Price
+                    weather_data_map = {} # Keep it empty but set flag or handle below
+                else:
+                    # Supplement with OpenMeteo
+                    for icao in icao_codes:
+                        try:
+                            om_data = await weather_fetcher.fetch_open_meteo(icao)
+                            if icao in weather_data_map:
+                                weather_data_map[icao].update(om_data)
+                        except: pass
 
             # Re-analyze each city
             for city, trades in city_groups.items():

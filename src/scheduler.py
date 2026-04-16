@@ -36,8 +36,14 @@ class BotScheduler:
                 return
 
             # 2. Fetch bulk weather data
-            logger.info(f"Fetching weather for {len(icao_codes)} stations...")
+            logger.info(f"Fetching weather for {len(icao_codes)} stations (with retries)...")
             weather_data_map = await weather_fetcher.fetch_weather_for_icao(icao_codes)
+            
+            if weather_data_map is None:
+                logger.error("!!! [SAFETY ABORT] Failed to fetch critical weather data after 3 retries. Skipping THIS whole scan cycle to prevent 'blind' trading.")
+                await send_telegram_message("⚠️ <b>[SAFETY ABORT]</b> Scan cycle skipped: Weather API (METAR/TAF) is unreachable after retries.")
+                return
+
             for icao in icao_codes:
                 try:
                     om_data = await weather_fetcher.fetch_open_meteo(icao)
