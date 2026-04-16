@@ -1,6 +1,6 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from config.settings import config
 from src.calibration import calibration_engine
 from src.trading_engine import trading_engine
@@ -8,45 +8,67 @@ from src.utils import logger
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📂 Открытые сделки", callback_data="open_trades")],
-        [InlineKeyboardButton("📜 Закрытые сделки", callback_data="closed_trades")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("⚙️ Риски", callback_data="risk_settings")]
+        ["📂 Открытые сделки", "📜 Закрытые сделки"],
+        ["📊 Статистика", "⚙️ Риски"],
+        ["▶️ Старт Бот", "⏸ Пауза Бот"],
+        ["🛑 Закрыть все сделки"]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Главное меню Полимаркет Бота:", reply_markup=reply_markup)
+
+async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text_cmd = update.message.text
+    
+    try:
+        if text_cmd == "📂 Открытые сделки":
+            text = await calibration_engine.get_open_trades_async(trading_engine.client)
+            await update.message.reply_text(text)
+        elif text_cmd == "📜 Закрытые сделки":
+            text = calibration_engine.get_closed_trades()
+            await update.message.reply_text(text)
+        elif text_cmd == "📊 Статистика":
+            client = trading_engine.client
+            text = calibration_engine.get_portfolio_stats(client)
+            await update.message.reply_text(text)
+        elif text_cmd == "⚙️ Риски":
+            text = calibration_engine.get_risk_summary()
+            await update.message.reply_text(text)
+        elif text_cmd == "▶️ Старт Бот":
+            config.is_paused = False
+            await update.message.reply_text("▶️ Бот запущен. Сканирование рынков включено.")
+            logger.info("Bot execution resumed via Telegram.")
+        elif text_cmd == "⏸ Пауза Бот":
+            config.is_paused = True
+            await update.message.reply_text("⏸ Бот поставлен на паузу. Новые сделки не открываются (монитор продолжает работать).")
+            logger.info("Bot execution paused via Telegram.")
+        elif text_cmd == "🛑 Закрыть все сделки":
+            # Show inline confirmation
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔥 ДА, ЗАКРЫТЬ ВСЕ", callback_data="confirm_liquidate"),
+                    InlineKeyboardButton("Отмена", callback_data="cancel_liquidate")
+                ]
+            ]
+            markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("⚠️ ОПАСНО!\nВы уверены, что хотите принудительно продать **все** открытые сделки по рыночным ценам (WAP)?", reply_markup=markup, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Telegram menu text error: {e}")
+        await update.message.reply_text("Произошла ошибка при выполнении команды.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    try:
-        if query.data == "open_trades":
-            text = await calibration_engine.get_open_trades_async(trading_engine.client)
-        elif query.data == "closed_trades":
-            text = calibration_engine.get_closed_trades()
-        elif query.data == "stats":
-            client = trading_engine.client
-            text = calibration_engine.get_portfolio_stats(client)
-        elif query.data == "risk_settings":
-            text = calibration_engine.get_risk_summary()
-        else:
-            text = "Неизвестная команда."
-
-        # Limit text length to avoid Telegram 4096 chars error
-        if len(text) > 4000:
-            text = text[:4000] + "\n... [Обрезано из-за лимитов Telegram]"
-
-        keyboard = [
-            [InlineKeyboardButton("📂 Открытые сделки", callback_data="open_trades")],
-            [InlineKeyboardButton("📜 Закрытые сделки", callback_data="closed_trades")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("⚙️ Риски", callback_data="risk_settings")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
-    except Exception as e:
-        if "Message is not modified" not in str(e):
-            logger.error(f"Telegram menu error: {e}")
+    if query.data == "confirm_liquidate":
+        await query.edit_message_text("Начинаю экстренную ликвидацию всех позиций...")
+        from src.portfolio_manager import portfolio_manager
+        client = trading_engine.client
+        await portfolio_manager.liquidate_all_trades(client)
+        await context.bot.send_message(chat_id=query.message.chat_id, text="✅ Все открытые позиции были выставлены на продажу.")
+        
+    elif query.data == "cancel_liquidate":
+        await query.edit_message_text("Отмена ликвидации. Продолжаем штатную работу.")
 
 async def set_risk_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -99,6 +121,7 @@ async def start_telegram_bot():
             application.add_handler(CommandHandler(c, set_risk_threshold))
             
         application.add_handler(CallbackQueryHandler(button_callback))
+        application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_menu_text))
         
         await application.initialize()
         await application.start()

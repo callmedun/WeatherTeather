@@ -20,6 +20,10 @@ class BotScheduler:
         self.city_lock = asyncio.Lock() # For thread-safe traded_cities access
 
     async def scan_and_trade(self):
+        if config.is_paused:
+            logger.info("⏸ Bot is currently PAUSED. Skipping market scan and new trades.")
+            return
+
         logger.info("=== Starting Full Scan & Trade Cycle (Best EV Mode) ===")
         ai_analyzer.consecutive_failures = 0
         try:

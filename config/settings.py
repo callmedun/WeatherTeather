@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     
     # Trading Params
     dry_run: bool = True
+    is_paused: bool = False
     max_trade_size_usd: float = 20.0
     default_trade_size: float = 15.0 # Required by PortfolioManager
     min_trade_usd: float = 1.0

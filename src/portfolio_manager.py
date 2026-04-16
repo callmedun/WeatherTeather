@@ -557,4 +557,67 @@ class PortfolioManager:
         finally:
             session.close()
 
+    async def liquidate_all_trades(self, clob_client) -> None:
+        """Экстренно закрывает все открытые позиции по рыночным ценам."""
+        from py_clob_client.clob_types import OrderArgs
+        if not clob_client:
+            logger.warning("[LIQUIDATE] clob_client is None. Skipping.")
+            return
+
+        session = self.Session()
+        try:
+            open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
+            if not open_trades:
+                logger.info("[LIQUIDATE] No open trades to liquidate.")
+                return
+
+            logger.info(f"[LIQUIDATE] Starting EMERGENCY LIQUIDATION for {len(open_trades)} trades...")
+            
+            for trade in open_trades:
+                shares = trade.size_usd / trade.entry_price if trade.entry_price > 0 else 0
+                exit_price, _, total_received = self._get_effective_exit_price(clob_client, trade.token_id, shares)
+                
+                if exit_price == 0:
+                    logger.warning(f"[LIQUIDATE] No liquidity for {trade.token_id}. Skipping.")
+                    continue
+                
+                # To guarantee execution, drop price slightly if needed, but not below 0.01 (WAP handles it mostly)
+                safe_exit = max(0.01, round(exit_price - 0.01, 3))
+                unrealized_pnl = total_received - trade.size_usd
+
+                if not config.dry_run:
+                    try:
+                        order_args = OrderArgs(
+                            price=safe_exit,
+                            size=shares,
+                            side="SELL",
+                            token_id=trade.token_id
+                        )
+                        resp = clob_client.create_and_post_order(order_args)
+                        if resp and resp.get("success"):
+                            trade.status = "SOLD"
+                            trade.resolved_at = datetime.utcnow()
+                            from src.calibration import calibration_engine
+                            calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None, exit_price=safe_exit, realized_pnl=unrealized_pnl)
+                            logger.info(f"[LIQUIDATE] Sold {trade.city} shares at {safe_exit}")
+                        else:
+                            logger.error(f"[LIQUIDATE] Failed to sell {trade.city}: {resp}")
+                    except Exception as e:
+                        logger.error(f"[LIQUIDATE] Exception selling {trade.city}: {e}")
+                else:
+                    trade.status = "SOLD"
+                    trade.resolved_at = datetime.utcnow()
+                    from src.calibration import calibration_engine
+                    calibration_engine.mark_trade_closed(trade.token_id, actual_outcome=None, exit_price=safe_exit, realized_pnl=unrealized_pnl)
+                    logger.info(f"[DRY_RUN LIQUIDATE] Sold {trade.city} shares at {safe_exit}")
+
+            session.commit()
+            logger.info("[LIQUIDATE] Emergency liquidation complete.")
+        except Exception as e:
+            logger.error(f"Error during liquidate_all_trades: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            session.close()
+
 portfolio_manager = PortfolioManager()
