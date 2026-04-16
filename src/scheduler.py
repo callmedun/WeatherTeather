@@ -193,3 +193,5 @@ class BotScheduler:
         from src.portfolio_manager import portfolio_manager
         logger.info("[SCHEDULER] Running scheduled 10-minute open trades monitor...")
         await portfolio_manager.monitor_open_trades(clob_client=trading_engine.client)
+
+bot_scheduler = BotScheduler()

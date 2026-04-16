@@ -34,9 +34,17 @@ async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = calibration_engine.get_risk_summary()
             await update.message.reply_text(text)
         elif text_cmd == "▶️ Старт Бот":
+            was_paused = config.is_paused
             config.is_paused = False
-            await update.message.reply_text("▶️ Бот запущен. Сканирование рынков включено.")
-            logger.info("Bot execution resumed via Telegram.")
+            
+            if was_paused:
+                await update.message.reply_text("▶️ Бот запущен. Запускаю внеочередной цикл сканирования рынков...")
+                logger.info("Bot execution resumed via Telegram. Triggering immediate scan_and_trade.")
+                import asyncio
+                from src.scheduler import bot_scheduler
+                asyncio.create_task(bot_scheduler.scan_and_trade())
+            else:
+                await update.message.reply_text("▶️ Бот уже работает.")
         elif text_cmd == "⏸ Пауза Бот":
             config.is_paused = True
             await update.message.reply_text("⏸ Бот поставлен на паузу. Новые сделки не открываются (монитор продолжает работать).")

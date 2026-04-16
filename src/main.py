@@ -23,8 +23,8 @@ async def start_bot():
     # Launch background PTB polling first so it isn't blocked by initial scans
     await start_telegram_bot()
     
-    scheduler_app = BotScheduler()
-    await scheduler_app.start()
+    from src.scheduler import bot_scheduler
+    await bot_scheduler.start()
 
     # Keep the main thread alive
     try:
