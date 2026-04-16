@@ -398,16 +398,30 @@ class PortfolioManager:
                 if city_markets_for_ai:
                     logger.info(f"[MONITOR] [{city}] Re-analyzing {len(city_markets_for_ai)} markets with fresh weather...")
                     fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets_for_ai, w_data)
-                    
-                    # Update memory with fresh probs
-                    for sig in fresh_signals:
-                        m_id = sig["market_id"]
-                        t_id = sig["token_id"]
-                        # Save to history file (updates latest state)
-                        calibration_engine.save_prediction(sig)
-                        # Update local dict for current loop
-                        key = f"{m_id}_{t_id}"
-                        ai_memory[key] = sig
+                    # Update memory with fresh probs and log shifts for active trades
+                    for t in trades:
+                        mem_key = f"{t.market_id}_{t.token_id}"
+                        old_mem = ai_memory.get(mem_key, {})
+                        old_prob = old_mem.get('predicted_prob')
+                        
+                        # Find the fresh signal for this specific token
+                        matching_sig = next((s for s in fresh_signals if s.get("token_id") == t.token_id), None)
+                        
+                        if matching_sig:
+                            new_prob = matching_sig.get('predicted_prob')
+                            if old_prob is not None and new_prob is not None:
+                                shift = (new_prob - old_prob) * 100
+                                # Extract clean name
+                                q_text = matching_sig.get("question", "")
+                                date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
+                                date_str = date_match.group(1) if date_match else "N/A"
+                                logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {shift:+.1f}%")
+                            
+                            # Save to history file (updates latest state)
+                            calibration_engine.save_prediction(matching_sig)
+                            # Update local dict for current loop
+                            ai_memory[mem_key] = matching_sig
+
 
             # 4. DECISION LOOP (Now with fresh probs)
             trades_sold = 0
