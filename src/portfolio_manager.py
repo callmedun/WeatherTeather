@@ -497,7 +497,7 @@ class PortfolioManager:
                         temp_str = temp_match.group(1).strip() if temp_match else "N/A"
                         header_str = f"{trade.city} ({date_str}) [{temp_str}] {trade.outcome_name}"
 
-                        logger.info(f"[MONITOR 10min] {header_str} | AI Prob: {predicted_prob*100:.1f}% | Edge: {new_edge:+.1f}% | WAP: {exit_price:.3f} (Entry: {trade.entry_price:.3f}) | PnL: {unrealized_pnl:+.2f}$ ({unrealized_pnl_percent:+.1f}%) → {exit_reason}")
+                        logger.info(f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason} SELL {shares:.2f} shares @ WAP {exit_price:.3f} (Entry: {trade.entry_price:.3f}) | PnL {unrealized_pnl:+.2f}$ ({unrealized_pnl_percent:+.1f}%)")
                         
                         if not config.dry_run:
                             try:
