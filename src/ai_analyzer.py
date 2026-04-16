@@ -50,7 +50,7 @@ class AIAnalyzer:
             ]
         )
 
-    async def analyze_city_batch(self, city: str, markets: list[dict], weather_data: dict) -> list[dict]:
+    async def analyze_city_batch(self, city: str, markets: list[dict], weather_data: dict, return_all: bool = False) -> list[dict]:
         """Analyzes all markets for one city in a single API call (Batch Mode)."""
         if not self.clients or not markets:
             return []
@@ -166,7 +166,8 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                 logger.error(f"JSON Error in Batch response: {response.text[:200]}")
                 return []
 
-            logger.info(f"[{city}] AI Batch analyzed {len(raw_results)} markets.")
+            if not return_all:
+                logger.info(f"[{city}] AI Batch analyzed {len(raw_results)} markets.")
             
             # 5. Process and Rank Signals
             final_signals = []
@@ -181,45 +182,60 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                 m_config = next((m for m in markets if m["market_id"] == m_id), None)
                 if not m_config: continue
 
-                rec = item.get("recommended_action", "SKIP")
-                sentiment = item.get("sentiment", "NEUTRAL")
-                confidence = item.get("confidence", 0)
-                target_outcome_name = "Yes" if "YES" in rec.upper() else "No"
-
-                matched_out = next((o for o in m_config["outcomes"] if o["name"].lower() == target_outcome_name.lower()), None)
-                if not matched_out: continue
-
-                market_price = matched_out["current_price"]
                 raw_prob = item.get("true_probability", 0.0)
-                
-                # Apply Calibration
                 calibrated_prob_yes = min(0.99, max(0.01, raw_prob * calib_factor))
-                p = calibrated_prob_yes if target_outcome_name == "Yes" else (1.0 - calibrated_prob_yes)
                 
-                # Math
-                edge_decimal = p - market_price
-                ev = (p * (1 - market_price)) - ((1 - p) * market_price)
-                
-                odds = (1 - market_price) / market_price if market_price > 0 else 0
-                full_kelly = (edge_decimal / odds) if odds > 0 else 0
-                fractional_kelly = full_kelly * config.kelly_fraction if full_kelly > 0 else 0.0
+                if return_all:
+                    # In re-analysis mode, return both YES and NO probabilities unconditionally
+                    for out in m_config.get("outcomes", []):
+                        out_name = out["name"]
+                        p = calibrated_prob_yes if out_name.lower() == "yes" else (1.0 - calibrated_prob_yes)
+                        final_signals.append({
+                            "market_id": m_config["market_id"],
+                            "question": m_config.get("question", "Unknown"),
+                            "token_id": out["token_id"],
+                            "outcome_name": out_name,
+                            "outcome_slug": out_name,
+                            "predicted_prob": p,
+                            "city": city
+                        })
+                else:
+                    # Original logic for finding BUY signals during Discovery
+                    rec = item.get("recommended_action", "SKIP")
+                    sentiment = item.get("sentiment", "NEUTRAL")
+                    confidence = item.get("confidence", 0)
+                    target_outcome_name = "Yes" if "YES" in rec.upper() else "No"
 
-                if ev > ev_threshold and fractional_kelly > 0 and confidence >= 82 and "BUY" in rec.upper():
-                    final_signals.append({
-                        "market_id": m_config["market_id"],
-                        "question": m_config.get("question", "Unknown"),
-                        "token_id": matched_out["token_id"],
-                        "outcome_name": matched_out["name"],
-                        "outcome_slug": target_outcome_name,
-                        "market_price": market_price,
-                        "true_probability": p,
-                        "ev": ev,
-                        "edge": edge_decimal * 100,
-                        "kelly": fractional_kelly,
-                        "confidence": confidence,
-                        "sentiment": sentiment,
-                        "city": city
-                    })
+                    matched_out = next((o for o in m_config["outcomes"] if o["name"].lower() == target_outcome_name.lower()), None)
+                    if not matched_out: continue
+
+                    market_price = matched_out.get("current_price", 0.0)
+                    p = calibrated_prob_yes if target_outcome_name == "Yes" else (1.0 - calibrated_prob_yes)
+                    
+                    edge_decimal = p - market_price
+                    ev = (p * (1 - market_price)) - ((1 - p) * market_price)
+                    
+                    odds = (1 - market_price) / market_price if market_price > 0 else 0
+                    full_kelly = (edge_decimal / odds) if odds > 0 else 0
+                    fractional_kelly = full_kelly * config.kelly_fraction if full_kelly > 0 else 0.0
+
+                    if ev > ev_threshold and fractional_kelly > 0 and confidence >= 82 and "BUY" in rec.upper():
+                        final_signals.append({
+                            "market_id": m_config["market_id"],
+                            "question": m_config.get("question", "Unknown"),
+                            "token_id": matched_out["token_id"],
+                            "outcome_name": matched_out["name"],
+                            "outcome_slug": target_outcome_name,
+                            "market_price": market_price,
+                            "true_probability": p,
+                            "predicted_prob": p,
+                            "ev": ev,
+                            "edge": edge_decimal * 100,
+                            "kelly": fractional_kelly,
+                            "confidence": confidence,
+                            "sentiment": sentiment,
+                            "city": city
+                        })
 
             return final_signals
             

@@ -397,7 +397,7 @@ class PortfolioManager:
 
                 if city_markets_for_ai:
                     logger.info(f"[MONITOR] [{city}] Re-analyzing {len(city_markets_for_ai)} markets with fresh weather...")
-                    fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets_for_ai, w_data)
+                    fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets_for_ai, w_data, return_all=True)
                     # Update memory with fresh probs and log shifts for active trades
                     for t in trades:
                         mem_key = f"{t.market_id}_{t.token_id}"
@@ -409,13 +409,17 @@ class PortfolioManager:
                         
                         if matching_sig:
                             new_prob = matching_sig.get('predicted_prob')
-                            if old_prob is not None and new_prob is not None:
-                                shift = (new_prob - old_prob) * 100
+                            if new_prob is not None:
                                 # Extract clean name
                                 q_text = matching_sig.get("question", "")
                                 date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
                                 date_str = date_match.group(1) if date_match else "N/A"
-                                logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {shift:+.1f}%")
+                                
+                                if old_prob is not None:
+                                    shift = (new_prob - old_prob) * 100
+                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {shift:+.1f}%")
+                                else:
+                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: [Нет старого] ➔ {new_prob*100:.1f}%")
                             
                             # Save to history file (updates latest state)
                             calibration_engine.save_prediction(matching_sig)
