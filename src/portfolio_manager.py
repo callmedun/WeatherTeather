@@ -377,38 +377,70 @@ class PortfolioManager:
                     logger.warning(f"[MONITOR] No weather for {city}, skipping re-analysis.")
                     continue
                 
-                # Construct "market" objects for AI analyzer from memory, grouped by market_id
+                # Construct "market" objects for AI analyzer, fetching full context from Polymarket
                 city_markets_dict = {}
+                
+                async with httpx.AsyncClient() as http_client:
+                    for cid in list(set([t.market_id for t in trades])):
+                        try:
+                            gamma_url = f"https://gamma-api.polymarket.com/markets?condition_id={cid}"
+                            r = await http_client.get(gamma_url, timeout=10.0)
+                            if r.status_code == 200:
+                                m_data = r.json()
+                                if m_data and len(m_data) > 0:
+                                    events = m_data[0].get("events", [])
+                                    if events:
+                                        event_id = events[0].get("id")
+                                        e_url = f"https://gamma-api.polymarket.com/events/{event_id}"
+                                        er = await http_client.get(e_url, timeout=10.0)
+                                        if er.status_code == 200:
+                                            ev_data = er.json()
+                                            event_title = ev_data.get("title", "")
+                                            market_list = ev_data.get("markets", [])
+                                            
+                                            from src.market_discovery import MarketDiscoverer
+                                            md = MarketDiscoverer()
+                                            for m_info in market_list:
+                                                if not m_info.get("closed") and m_info.get("active"):
+                                                    m_cid = m_info.get("conditionId")
+                                                    if m_cid not in city_markets_dict:
+                                                        parsed = md._parse_market(m_info, city, event_title)
+                                                        if parsed:
+                                                            city_markets_dict[m_cid] = parsed
+                        except Exception as e:
+                            logger.error(f"[MONITOR] Failed to fetch full context for condition {cid}: {e}")
+                
+                # For any trade that failed to fetch context, reconstruct artificially (Fallback)
                 for t in trades:
-                    mem_key = f"{t.market_id}_{t.token_id}"
-                    mem = ai_memory.get(mem_key)
-                    if not mem:
-                        logger.debug(f"[MONITOR] Missing metadata for {t.city} {t.token_id}. Skipping re-analysis.")
-                        continue
-                        
                     if t.market_id not in city_markets_dict:
+                        mem_key = f"{t.market_id}_{t.token_id}"
+                        mem = ai_memory.get(mem_key)
+                        if not mem:
+                            logger.debug(f"[MONITOR] Missing metadata for {t.city} {t.token_id}. Skipping.")
+                            continue
+                        
+                        curr_price = self.get_current_price(clob_client, t.token_id)
+                        curr_price = curr_price if curr_price is not None else 0.5
+                        alt_name = "No" if t.outcome_name.lower() == "yes" else "Yes"
+                        
                         city_markets_dict[t.market_id] = {
                             "market_id": t.market_id,
-                            "question": mem.get("question"),
-                            "event_title": mem.get("event_title"),
+                            "question": mem.get("question", ""),
+                            "event_title": mem.get("event_title", ""),
                             "city": city,
-                            "outcomes": []
+                            "outcomes": [
+                                {
+                                    "name": t.outcome_name, 
+                                    "token_id": t.token_id, 
+                                    "current_price": curr_price
+                                },
+                                {
+                                    "name": alt_name,
+                                    "token_id": "dummy_" + alt_name,
+                                    "current_price": max(0.01, 1.0 - curr_price)
+                                }
+                            ]
                         }
-                    
-                    curr_price = self.get_current_price(clob_client, t.token_id)
-                    curr_price = curr_price if curr_price is not None else 0.5
-                    
-                    city_markets_dict[t.market_id]["outcomes"].append({
-                        "name": t.outcome_name, 
-                        "token_id": t.token_id, 
-                        "current_price": curr_price
-                    })
-                    alt_name = "No" if t.outcome_name.lower() == "yes" else "Yes"
-                    city_markets_dict[t.market_id]["outcomes"].append({
-                        "name": alt_name,
-                        "token_id": "dummy_" + alt_name,
-                        "current_price": max(0.01, 1.0 - curr_price)
-                    })
                 
                 city_markets_for_ai = list(city_markets_dict.values())
                 if city_markets_for_ai:
