@@ -89,6 +89,11 @@ class TradingEngine:
         
         logger.info(f"Preparing trade for {city} | Outcome: {analysis.get('outcome_slug')} | Top Ask: {best_ask_price}")
 
+        # 0. Extreme Price Filter (Guardrails)
+        if best_ask_price < 0.10 or best_ask_price > 0.90:
+            logger.info(f"Skipping trade: Market price ({best_ask_price}) indicates outcome is highly resolved.")
+            return
+
         # 1. Calculate Initial Kelly Sizing
         kelly_frac = analysis.get("kelly", 0.0)
         target_payout = 100.0 * kelly_frac

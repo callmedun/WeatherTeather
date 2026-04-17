@@ -219,9 +219,9 @@ class PortfolioManager:
         try:
             defaults = {
                 "tp_edge": 5.0,         # Take Profit Edge (5%)
-                "strong_tp_pnl": 30.0,   # Strong PnL TP (30%)
+                "strong_tp_pnl": 60.0,   # Strong PnL TP (60%)
                 "sl_edge": -12.0,        # Stop Loss Edge (-12%)
-                "sl_pnl": -30.0,         # Stop Loss PnL (-30%)
+                "sl_pnl": -70.0,         # Stop Loss PnL (-70%)
                 "time_exit_h": 6.0       # Time-based exit (6 hours)
             }
             for k, v in defaults.items():
@@ -232,7 +232,9 @@ class PortfolioManager:
                     # Auto-migration of old defaults to new standards
                     if k == "tp_edge" and existing.value == 10.0:
                         existing.value = v
-                    elif k == "sl_pnl" and existing.value == -15.0:
+                    elif k == "strong_tp_pnl" and existing.value == 30.0:
+                        existing.value = v
+                    elif k == "sl_pnl" and existing.value in [-15.0, -30.0]:
                         existing.value = v
             session.commit()
         except Exception as e:
@@ -497,9 +499,9 @@ class PortfolioManager:
 
                     # Fetch current thresholds
                     tp_edge_limit = self.get_risk_setting("tp_edge", 10.0)
-                    strong_tp_limit = self.get_risk_setting("strong_tp_pnl", 30.0)
+                    strong_tp_limit = self.get_risk_setting("strong_tp_pnl", 60.0)
                     sl_edge_limit = self.get_risk_setting("sl_edge", -12.0)
-                    sl_pnl_limit = self.get_risk_setting("sl_pnl", -15.0)
+                    sl_pnl_limit = self.get_risk_setting("sl_pnl", -70.0)
                     time_exit_limit = self.get_risk_setting("time_exit_h", 6.0)
 
                     exit_reason = None
