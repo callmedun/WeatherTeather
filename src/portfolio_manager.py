@@ -218,7 +218,7 @@ class PortfolioManager:
         session = self.Session()
         try:
             defaults = {
-                "tp_edge": 5.0,         # Take Profit Edge (5%)
+                "tp_edge": 0.0,         # Take Profit Edge (0%)
                 "strong_tp_pnl": 60.0,   # Strong PnL TP (60%)
                 "sl_edge": -12.0,        # Stop Loss Edge (-12%)
                 "sl_pnl": -70.0,         # Stop Loss PnL (-70%)
@@ -230,7 +230,7 @@ class PortfolioManager:
                     session.add(RiskSetting(key=k, value=v))
                 else:
                     # Auto-migration of old defaults to new standards
-                    if k == "tp_edge" and existing.value == 10.0:
+                    if k == "tp_edge" and existing.value in [5.0, 10.0]:
                         existing.value = v
                     elif k == "strong_tp_pnl" and existing.value == 30.0:
                         existing.value = v
@@ -498,7 +498,7 @@ class PortfolioManager:
                         pass
 
                     # Fetch current thresholds
-                    tp_edge_limit = self.get_risk_setting("tp_edge", 10.0)
+                    tp_edge_limit = self.get_risk_setting("tp_edge", 0.0)
                     strong_tp_limit = self.get_risk_setting("strong_tp_pnl", 60.0)
                     sl_edge_limit = self.get_risk_setting("sl_edge", -12.0)
                     sl_pnl_limit = self.get_risk_setting("sl_pnl", -70.0)
