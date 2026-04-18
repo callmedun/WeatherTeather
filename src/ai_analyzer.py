@@ -140,18 +140,22 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                                 contents=content,
                                 config=self.generation_config
                             ),
-                            timeout=45.0
+                            timeout=120.0  # Increased for massive batches
                         )
                         if response and response.text:
                             success = True
                             meta["use_count"] += 1
                             break
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[AI] Key {idx} Timeout after 120s. Trying next.")
+                        meta["last_used"] = time.time()
                     except Exception as e:
-                        if "429" in str(e) or "500" in str(e):
-                            logger.warning(f"[AI] Key {idx} Batch Error: {str(e)[:40]}. Trying next.")
+                        err_str = str(e)
+                        if "429" in err_str or "500" in err_str or "503" in err_str:
+                            logger.warning(f"[AI] Key {idx} Batch API Error: {err_str[:40]}. Trying next.")
                             meta["last_used"] = time.time() + 10.0
                         else:
-                            logger.error(f"[AI] Key {idx} Fatal: {e}")
+                            logger.error(f"[AI] Key {idx} Fatal ({type(e).__name__}): {e}")
                             break
 
             if not success or not response:
