@@ -134,10 +134,13 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                         self.last_global_call = time.time()
 
                     try:
-                        response = await client.aio.models.generate_content(
-                            model=self.fallback_models[0],
-                            contents=content,
-                            config=self.generation_config
+                        response = await asyncio.wait_for(
+                            client.aio.models.generate_content(
+                                model=self.fallback_models[0],
+                                contents=content,
+                                config=self.generation_config
+                            ),
+                            timeout=45.0
                         )
                         if response and response.text:
                             success = True

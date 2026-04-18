@@ -40,6 +40,9 @@ class MarketDiscoverer:
                     if not data:
                         has_more = False
                         break
+                    
+                    if len(data) < limit:
+                        has_more = False
                         
                     for event in data:
                         title = event.get("title", "")
