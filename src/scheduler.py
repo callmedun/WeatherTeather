@@ -52,104 +52,104 @@ class BotScheduler:
             logger.info("=== Starting Full Scan & Trade Cycle (Best EV Mode) ===")
             ai_analyzer.consecutive_failures = 0
             try:
-            # 1. Fetch active weather markets
-            markets = await self.discoverer.get_active_weather_markets()
-            if not markets:
-                logger.info("No relevant weather markets found.")
-                return
+                # 1. Fetch active weather markets
+                markets = await self.discoverer.get_active_weather_markets()
+                if not markets:
+                    logger.info("No relevant weather markets found.")
+                    return
 
-            # Group unique ICAO codes needed
-            icao_codes = list(set([m['icao_code'] for m in markets if m.get('icao_code')]))
-            if not icao_codes:
-                logger.warning("No valid ICAO codes resolved from active markets.")
-                return
+                # Group unique ICAO codes needed
+                icao_codes = list(set([m['icao_code'] for m in markets if m.get('icao_code')]))
+                if not icao_codes:
+                    logger.warning("No valid ICAO codes resolved from active markets.")
+                    return
 
-            # 2. Fetch bulk weather data
-            logger.info(f"Fetching weather for {len(icao_codes)} stations (with retries)...")
-            weather_data_map = await weather_fetcher.fetch_weather_for_icao(icao_codes)
-            
-            if weather_data_map is None:
-                logger.error("!!! [SAFETY ABORT] Failed to fetch critical weather data after 3 retries. Skipping THIS whole scan cycle to prevent 'blind' trading.")
-                await send_telegram_message("⚠️ <b>[SAFETY ABORT]</b> Scan cycle skipped: Weather API (METAR/TAF) is unreachable after retries.")
-                return
-
-            for icao in icao_codes:
-                try:
-                    om_data = await weather_fetcher.fetch_open_meteo(icao)
-                    if icao in weather_data_map:
-                        weather_data_map[icao].update(om_data)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
-
-            # 3. Process cities using Batch AI Analysis
-            semaphore = asyncio.Semaphore(len(ai_analyzer.clients))
-            
-            async def process_city(city: str, icao: str) -> list[dict]:
-                async with semaphore:
-                    city_markets = [m for m in markets if m["city"] == city]
-                    if not city_markets:
-                        return []
-                    
-                    w_data = weather_data_map.get(icao)
-                    if not w_data: 
-                        return []
-                        
-                    # Pre-filter outcomes
-                    for m in city_markets:
-                        m["outcomes"] = [o for o in m.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
-                    city_markets = [m for m in city_markets if m["outcomes"]]
-                    
-                    if not city_markets:
-                        return []
-                        
-                    logger.info(f"[{city}] Sending batch request for {len(city_markets)} markets...")
-                    signals = await ai_analyzer.analyze_city_batch(city, city_markets, w_data)
-                    return signals
-
-            # Process all cities in parallel (semaphore limited)
-            city_tasks = [process_city(city, icao) for city, icao in config.city_icao_mapping.items()]
-            all_city_signals = await asyncio.gather(*city_tasks)
-            
-            # 4. Execute trades based on signals
-            for i, city in enumerate(config.city_icao_mapping.keys()):
-                signals_list = all_city_signals[i]
-                if not signals_list:
-                    continue
-
-                # Sort by EV descending
-                signals_list.sort(key=lambda x: x["ev"], reverse=True)
+                # 2. Fetch bulk weather data
+                logger.info(f"Fetching weather for {len(icao_codes)} stations (with retries)...")
+                weather_data_map = await weather_fetcher.fetch_weather_for_icao(icao_codes)
                 
-                # Fetch currently open trades for this city
-                open_trades = portfolio_manager.get_open_trades_for_city(city)
-                open_sentiments = [t.sentiment for t in open_trades if t.sentiment]
-                open_tokens = [t.token_id for t in open_trades]
+                if weather_data_map is None:
+                    logger.error("!!! [SAFETY ABORT] Failed to fetch critical weather data after 3 retries. Skipping THIS whole scan cycle to prevent 'blind' trading.")
+                    await send_telegram_message("⚠️ <b>[SAFETY ABORT]</b> Scan cycle skipped: Weather API (METAR/TAF) is unreachable after retries.")
+                    return
+
+                for icao in icao_codes:
+                    try:
+                        om_data = await weather_fetcher.fetch_open_meteo(icao)
+                        if icao in weather_data_map:
+                            weather_data_map[icao].update(om_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
+
+                # 3. Process cities using Batch AI Analysis
+                semaphore = asyncio.Semaphore(len(ai_analyzer.clients))
                 
-                trades_to_execute = []
-                for sig in signals_list:
-                    if len(open_trades) + len(trades_to_execute) >= 2:
-                        break
-                    if sig["token_id"] in open_tokens:
-                        # Update prediction memory but skip buying
-                        calibration_engine.save_prediction(sig)
+                async def process_city(city: str, icao: str) -> list[dict]:
+                    async with semaphore:
+                        city_markets = [m for m in markets if m["city"] == city]
+                        if not city_markets:
+                            return []
+                        
+                        w_data = weather_data_map.get(icao)
+                        if not w_data: 
+                            return []
+                            
+                        # Pre-filter outcomes
+                        for m in city_markets:
+                            m["outcomes"] = [o for o in m.get("outcomes", []) if 0.02 <= o["current_price"] <= 0.98]
+                        city_markets = [m for m in city_markets if m["outcomes"]]
+                        
+                        if not city_markets:
+                            return []
+                            
+                        logger.info(f"[{city}] Sending batch request for {len(city_markets)} markets...")
+                        signals = await ai_analyzer.analyze_city_batch(city, city_markets, w_data)
+                        return signals
+
+                # Process all cities in parallel (semaphore limited)
+                city_tasks = [process_city(city, icao) for city, icao in config.city_icao_mapping.items()]
+                all_city_signals = await asyncio.gather(*city_tasks)
+                
+                # 4. Execute trades based on signals
+                for i, city in enumerate(config.city_icao_mapping.keys()):
+                    signals_list = all_city_signals[i]
+                    if not signals_list:
                         continue
-                    if sig["sentiment"] in open_sentiments and sig["sentiment"] != "NEUTRAL":
-                        continue
+
+                    # Sort by EV descending
+                    signals_list.sort(key=lambda x: x["ev"], reverse=True)
                     
-                    # Conflict check within the city batch
-                    if any(existing["market_id"] == sig["market_id"] for existing in trades_to_execute):
-                        continue
+                    # Fetch currently open trades for this city
+                    open_trades = portfolio_manager.get_open_trades_for_city(city)
+                    open_sentiments = [t.sentiment for t in open_trades if t.sentiment]
+                    open_tokens = [t.token_id for t in open_trades]
+                    
+                    trades_to_execute = []
+                    for sig in signals_list:
+                        if len(open_trades) + len(trades_to_execute) >= 2:
+                            break
+                        if sig["token_id"] in open_tokens:
+                            # Update prediction memory but skip buying
+                            calibration_engine.save_prediction(sig)
+                            continue
+                        if sig["sentiment"] in open_sentiments and sig["sentiment"] != "NEUTRAL":
+                            continue
+                        
+                        # Conflict check within the city batch
+                        if any(existing["market_id"] == sig["market_id"] for existing in trades_to_execute):
+                            continue
 
-                    trades_to_execute.append(sig)
-                    open_sentiments.append(sig["sentiment"])
+                        trades_to_execute.append(sig)
+                        open_sentiments.append(sig["sentiment"])
 
-                for sig in trades_to_execute:
-                    logger.success(
-                        f"Ranked Signal! {city} -> BUY {sig['sentiment']} '{sig['outcome_slug']}' "
-                        f"(EV: {sig['ev']:+.3f}, Edge: {sig['edge']:+.1f}%)"
-                    )
-                    await trading_engine.execute_trade(sig)
+                    for sig in trades_to_execute:
+                        logger.success(
+                            f"Ranked Signal! {city} -> BUY {sig['sentiment']} '{sig['outcome_slug']}' "
+                            f"(EV: {sig['ev']:+.3f}, Edge: {sig['edge']:+.1f}%)"
+                        )
+                        await trading_engine.execute_trade(sig)
 
-            logger.info("=== Scan & Trade Cycle Completed ===")
+                logger.info("=== Scan & Trade Cycle Completed ===")
             
         except Exception as e:
             logger.error(f"Error during scan cycle: {e}")
