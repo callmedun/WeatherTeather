@@ -17,31 +17,52 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Главное меню Полимаркет Бота:", reply_markup=reply_markup)
 
+async def safe_reply(update: Update, text: str):
+    if len(text) <= 4000:
+        await update.message.reply_text(text)
+        return
+    
+    parts = []
+    current_part = ""
+    for line in text.split('\n'):
+        if len(current_part) + len(line) + 1 > 4000:
+            parts.append(current_part)
+            current_part = line + '\n'
+        else:
+            current_part += line + '\n'
+            
+    if current_part:
+        parts.append(current_part)
+        
+    for p in parts:
+        if p.strip():
+            await update.message.reply_text(p)
+
 async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_cmd = update.message.text
     
     try:
         if text_cmd == "📂 Открытые сделки":
             text = await calibration_engine.get_open_trades_async(trading_engine.client)
-            await update.message.reply_text(text)
+            await safe_reply(update, text)
         elif text_cmd == "📜 Закрытые сделки":
             text = calibration_engine.get_closed_trades()
-            await update.message.reply_text(text)
+            await safe_reply(update, text)
         elif text_cmd == "💰 Баланс":
             client = trading_engine.client
             text = calibration_engine.get_balance_summary(client)
-            await update.message.reply_text(text)
+            await safe_reply(update, text)
         elif text_cmd == "📊 Статистика":
             client = trading_engine.client
             text = calibration_engine.get_portfolio_stats(client)
-            await update.message.reply_text(text)
+            await safe_reply(update, text)
         elif text_cmd == "⚙️ Статус":
             from src.scheduler import bot_scheduler
             text = bot_scheduler.get_system_status()
-            await update.message.reply_text(text)
+            await safe_reply(update, text)
         elif text_cmd == "⚙️ Риски":
             text = calibration_engine.get_risk_summary()
-            await update.message.reply_text(text)
+            await safe_reply(update, text)
         elif text_cmd == "▶️ Старт Бот":
             was_paused = config.is_paused
             config.is_paused = False
