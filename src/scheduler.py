@@ -151,12 +151,12 @@ class BotScheduler:
 
                 logger.info("=== Scan & Trade Cycle Completed ===")
             
-        except Exception as e:
-            logger.error(f"Error during scan cycle: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            self.last_scan_time = datetime.utcnow()
+            except Exception as e:
+                logger.error(f"Error during scan cycle: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                self.last_scan_time = datetime.utcnow()
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here
