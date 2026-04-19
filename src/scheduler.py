@@ -20,6 +20,7 @@ class BotScheduler:
         self.city_lock = asyncio.Lock() # For thread-safe traded_cities access
         self.last_scan_time = None
         self.last_monitor_time = None
+        self._master_cycle_lock = asyncio.Lock()
         
     def get_system_status(self) -> str:
         """Generates a text report about bot health and scheduling."""
@@ -44,9 +45,13 @@ class BotScheduler:
             logger.info("⏸ Bot is currently PAUSED. Skipping market scan and new trades.")
             return
 
-        logger.info("=== Starting Full Scan & Trade Cycle (Best EV Mode) ===")
-        ai_analyzer.consecutive_failures = 0
-        try:
+        if self._master_cycle_lock.locked():
+            logger.info("[SCHEDULER] scan_and_trade is waiting for other processes to finish...")
+            
+        async with self._master_cycle_lock:
+            logger.info("=== Starting Full Scan & Trade Cycle (Best EV Mode) ===")
+            ai_analyzer.consecutive_failures = 0
+            try:
             # 1. Fetch active weather markets
             markets = await self.discoverer.get_active_weather_markets()
             if not markets:
@@ -212,9 +217,14 @@ class BotScheduler:
         await self.monitor_open_trades_task()
 
     async def monitor_open_trades_task(self):
-        from src.portfolio_manager import portfolio_manager
-        logger.info("[SCHEDULER] Running scheduled 10-minute open trades monitor...")
-        await portfolio_manager.monitor_open_trades(clob_client=trading_engine.client)
-        self.last_monitor_time = datetime.utcnow()
+        if self._master_cycle_lock.locked():
+            logger.info("[SCHEDULER] monitor_open_trades skipped because scan_and_trade is running.")
+            return
+            
+        async with self._master_cycle_lock:
+            from src.portfolio_manager import portfolio_manager
+            logger.info("[SCHEDULER] Running scheduled 10-minute open trades monitor...")
+            await portfolio_manager.monitor_open_trades(clob_client=trading_engine.client)
+            self.last_monitor_time = datetime.utcnow()
 
 bot_scheduler = BotScheduler()
