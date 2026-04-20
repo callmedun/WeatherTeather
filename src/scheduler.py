@@ -105,8 +105,18 @@ class BotScheduler:
                             return []
                             
                         logger.info(f"[{city}] Sending batch request for {len(city_markets)} markets...")
-                        signals = await ai_analyzer.analyze_city_batch(city, city_markets, w_data)
-                        return signals
+                        try:
+                            signals = await asyncio.wait_for(
+                                ai_analyzer.analyze_city_batch(city, city_markets, w_data),
+                                timeout=600  # 10 min per-city hard cap
+                            )
+                            return signals
+                        except asyncio.TimeoutError:
+                            logger.warning(f"[{city}] AI batch timed out after 10 minutes. Skipping city.")
+                            return []
+                        except Exception as e:
+                            logger.error(f"[{city}] process_city error: {e}")
+                            return []
 
                 # Process all cities in parallel (semaphore limited)
                 city_tasks = [process_city(city, icao) for city, icao in config.city_icao_mapping.items()]

@@ -134,15 +134,21 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                         self.last_global_call = time.time()
 
                     try:
-                        response = await client.aio.models.generate_content(
-                            model=self.fallback_models[0],
-                            contents=content,
-                            config=self.generation_config
+                        response = await asyncio.wait_for(
+                            client.aio.models.generate_content(
+                                model=self.fallback_models[0],
+                                contents=content,
+                                config=self.generation_config
+                            ),
+                            timeout=120  # 2 min per-call hard cap
                         )
                         if response and response.text:
                             success = True
                             meta["use_count"] += 1
                             break
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[AI] Key {idx} timed out after 120s. Trying next key.")
+                        meta["last_used"] = time.time() + 20.0
                     except Exception as e:
                         err_str = str(e)
                         if "429" in err_str or "500" in err_str or "503" in err_str:
