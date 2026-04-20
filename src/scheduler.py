@@ -20,7 +20,7 @@ class BotScheduler:
         self.city_lock = asyncio.Lock() # For thread-safe traded_cities access
         self.last_scan_time = None
         self.last_monitor_time = None
-        self._master_cycle_lock = asyncio.Lock()
+        self._busy = False  # Simple flag to prevent overlap
         
     def get_system_status(self) -> str:
         """Generates a text report about bot health and scheduling."""
@@ -45,10 +45,12 @@ class BotScheduler:
             logger.info("⏸ Bot is currently PAUSED. Skipping market scan and new trades.")
             return
 
-        if self._master_cycle_lock.locked():
-            logger.info("[SCHEDULER] scan_and_trade is waiting for other processes to finish...")
+        if self._busy:
+            logger.info("[SCHEDULER] scan_and_trade skipped — another cycle is still running.")
+            return
             
-        async with self._master_cycle_lock:
+        self._busy = True
+        try:
             logger.info("=== Starting Full Scan & Trade Cycle (Best EV Mode) ===")
             ai_analyzer.consecutive_failures = 0
             try:
@@ -157,6 +159,8 @@ class BotScheduler:
                 traceback.print_exc()
             finally:
                 self.last_scan_time = datetime.utcnow()
+        finally:
+            self._busy = False
 
     async def cleanup_daily(self):
         # We can implement cleanup of portfolio DB or exports here
@@ -217,14 +221,25 @@ class BotScheduler:
         await self.monitor_open_trades_task()
 
     async def monitor_open_trades_task(self):
-        if self._master_cycle_lock.locked():
-            logger.info("[SCHEDULER] monitor_open_trades skipped because scan_and_trade is running.")
+        if self._busy:
+            logger.info("[SCHEDULER] monitor_open_trades skipped — scan_and_trade is running.")
             return
             
-        async with self._master_cycle_lock:
+        self._busy = True
+        try:
             from src.portfolio_manager import portfolio_manager
             logger.info("[SCHEDULER] Running scheduled 10-minute open trades monitor...")
-            await portfolio_manager.monitor_open_trades(clob_client=trading_engine.client)
+            await asyncio.wait_for(
+                portfolio_manager.monitor_open_trades(clob_client=trading_engine.client),
+                timeout=480  # 8 minutes hard cap
+            )
             self.last_monitor_time = datetime.utcnow()
+        except asyncio.TimeoutError:
+            logger.warning("[SCHEDULER] monitor_open_trades TIMED OUT after 8 minutes. Releasing for next cycle.")
+            self.last_monitor_time = datetime.utcnow()
+        except Exception as e:
+            logger.error(f"[SCHEDULER] monitor_open_trades error: {e}")
+        finally:
+            self._busy = False
 
 bot_scheduler = BotScheduler()
