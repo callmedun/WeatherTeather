@@ -140,14 +140,14 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                                 contents=content,
                                 config=self.generation_config
                             ),
-                            timeout=120  # 2 min per-call hard cap
+                            timeout=300  # 5 min per-call hard cap
                         )
                         if response and response.text:
                             success = True
                             meta["use_count"] += 1
                             break
                     except asyncio.TimeoutError:
-                        logger.warning(f"[AI] Key {idx} timed out after 120s. Trying next key.")
+                        logger.warning(f"[AI] Key {idx} timed out after 300s. Trying next key.")
                         meta["last_used"] = time.time() + 20.0
                     except Exception as e:
                         err_str = str(e)
