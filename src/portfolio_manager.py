@@ -369,10 +369,10 @@ class PortfolioManager:
                                 weather_data_map[icao].update(om_data)
                         except: pass
 
-            # Re-analyze all cities in parallel
+            # Re-analyze all cities in parallel (semaphore limits concurrent AI calls)
             semaphore = asyncio.Semaphore(len(ai_analyzer.clients) if hasattr(ai_analyzer, 'clients') and ai_analyzer.clients else 1)
 
-            async def process_monitor_city(city: str, trades: list):
+            async def process_monitor_city(city: str, trades: list, all_city_markets: list):
                 async with semaphore:
                     icao = config.city_icao_mapping.get(city)
                     w_data = weather_data_map.get(icao)
@@ -380,132 +380,71 @@ class PortfolioManager:
                         logger.warning(f"[MONITOR] No weather for {city}, skipping re-analysis.")
                         return
                     
-                    # Construct "market" objects for AI analyzer, fetching full context from Polymarket
-                    city_markets_dict = {}
+                    # Use ALL active markets for this city — same context as the hourly scan.
+                    # This prevents AI from giving different answers due to narrower context.
+                    city_markets_for_ai = [
+                        m for m in all_city_markets
+                        if m.get("city") == city
+                        and m.get("outcomes")
+                        and any(0.02 <= o["current_price"] <= 0.98 for o in m["outcomes"])
+                    ]
                     
-                    async with httpx.AsyncClient() as http_client:
-                        for cid in list(set([t.market_id for t in trades])):
-                            try:
-                                gamma_url = f"https://gamma-api.polymarket.com/markets?condition_id={cid}"
-                                r = await http_client.get(gamma_url, timeout=10.0)
-                                if r.status_code == 200:
-                                    m_data = r.json()
-                                    if m_data and len(m_data) > 0:
-                                        events = m_data[0].get("events", [])
-                                        if events:
-                                            event_id = events[0].get("id")
-                                            e_url = f"https://gamma-api.polymarket.com/events/{event_id}"
-                                            er = await http_client.get(e_url, timeout=10.0)
-                                            if er.status_code == 200:
-                                                ev_data = er.json()
-                                                event_title = ev_data.get("title", "")
-                                                market_list = ev_data.get("markets", [])
-                                                
-                                                from src.market_discovery import MarketDiscoverer
-                                                md = MarketDiscoverer()
-                                                for m_info in market_list:
-                                                    if not m_info.get("closed") and m_info.get("active"):
-                                                        m_cid = m_info.get("conditionId")
-                                                        if m_cid not in city_markets_dict:
-                                                            parsed = md._parse_market(m_info, city, event_title)
-                                                            if parsed:
-                                                                city_markets_dict[m_cid] = parsed
-                            except Exception as e:
-                                logger.error(f"[MONITOR] Failed to fetch full context for condition {cid}: {e}")
+                    # Filter outcomes to tradeable range
+                    for m in city_markets_for_ai:
+                        m["outcomes"] = [o for o in m["outcomes"] if 0.02 <= o["current_price"] <= 0.98]
+                    city_markets_for_ai = [m for m in city_markets_for_ai if m["outcomes"]]
+
+                    if not city_markets_for_ai:
+                        logger.warning(f"[MONITOR] No active markets found for {city}, skipping re-analysis.")
+                        return
                     
-                    # For any trade that failed to fetch context, reconstruct artificially (Fallback)
+                    logger.info(f"[MONITOR] [{city}] Re-analyzing {len(city_markets_for_ai)} markets with fresh weather...")
+                    fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets_for_ai, w_data, return_all=True)
+                    
+                    # Update memory — but only log/use results for OUR open trades
                     for t in trades:
-                        if t.market_id not in city_markets_dict:
-                            mem_key = f"{t.market_id}_{t.token_id}"
-                            mem = ai_memory.get(mem_key)
-                            if not mem:
-                                logger.debug(f"[MONITOR] Missing metadata for {t.city} {t.token_id}. Skipping.")
-                                continue
-                            
-                            curr_price = self.get_current_price(clob_client, t.token_id)
-                            curr_price = curr_price if curr_price is not None else 0.5
-                            alt_name = "No" if t.outcome_name.lower() == "yes" else "Yes"
-                            
-                            city_markets_dict[t.market_id] = {
-                                "market_id": t.market_id,
-                                "question": mem.get("question", ""),
-                                "event_title": mem.get("event_title", ""),
-                                "city": city,
-                                "outcomes": [
-                                    {
-                                        "name": t.outcome_name, 
-                                        "token_id": t.token_id, 
-                                        "current_price": curr_price
-                                    },
-                                    {
-                                        "name": alt_name,
-                                        "token_id": "dummy_" + alt_name,
-                                        "current_price": max(0.01, 1.0 - curr_price)
-                                    }
-                                ]
-                            }
-                    
-                    city_markets_for_ai = list(city_markets_dict.values())
-                    if city_markets_for_ai:
-                        logger.info(f"[MONITOR] [{city}] Re-analyzing {len(city_markets_for_ai)} markets with fresh weather...")
-                        fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets_for_ai, w_data, return_all=True)
-                        # Update memory with fresh probs and log shifts for active trades
-                        for t in trades:
-                            mem_key = f"{t.market_id}_{t.token_id}"
-                            old_mem = ai_memory.get(mem_key, {})
-                            old_prob = old_mem.get('predicted_prob')
-                            
-                            # Find the fresh signal for this specific token
-                            matching_sig = next((s for s in fresh_signals if s.get("token_id") == t.token_id), None)
-                            
-                            if matching_sig:
-                                new_prob = matching_sig.get('predicted_prob')
-                                if new_prob is not None:
-                                    # Extract clean name
-                                    q_text = matching_sig.get("question", "")
-                                    date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
-                                    date_str = date_match.group(1) if date_match else "N/A"
-                                    
-                                    if old_prob is not None:
-                                        shift = (new_prob - old_prob) * 100
-                                        # ANOMALY FILTER: clamp AI drifts > 25% per cycle
-                                        # These are model instability artefacts, not real market signals
-                                        MAX_SHIFT = 0.25
-                                        if abs(new_prob - old_prob) > MAX_SHIFT:
-                                            clamped_prob = old_prob + MAX_SHIFT * (1 if new_prob > old_prob else -1)
-                                            logger.warning(
-                                                f"[MONITOR] ⚠️ {city} ({date_str}) \"{t.outcome_name}\" "
-                                                f"Аномальный сдвиг ИИ {shift:+.1f}% — ограничен до {(clamped_prob-old_prob)*100:+.1f}%"
-                                            )
-                                            new_prob = clamped_prob
-                                            matching_sig['predicted_prob'] = new_prob
-                                        
-                                        effective_shift = (new_prob - old_prob) * 100
-                                        logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {effective_shift:+.1f}%")
-                                    else:
-                                        logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: [Нет старого] ➔ {new_prob*100:.1f}%")
+                        mem_key = f"{t.market_id}_{t.token_id}"
+                        old_mem = ai_memory.get(mem_key, {})
+                        old_prob = old_mem.get('predicted_prob')
+                        
+                        matching_sig = next((s for s in fresh_signals if s.get("token_id") == t.token_id), None)
+                        
+                        if matching_sig:
+                            new_prob = matching_sig.get('predicted_prob')
+                            if new_prob is not None:
+                                q_text = matching_sig.get("question", "")
+                                date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
+                                date_str = date_match.group(1) if date_match else "N/A"
                                 
-                                # Update probability for open trade in history
-                                calibration_engine.update_prediction_prob(t.token_id, new_prob)
-                                # Update local dict for current loop
-                                ai_memory[mem_key] = matching_sig
+                                if old_prob is not None:
+                                    shift = (new_prob - old_prob) * 100
+                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {shift:+.1f}%")
+                                else:
+                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: [Нет старого] ➔ {new_prob*100:.1f}%")
+                            
+                            calibration_engine.update_prediction_prob(t.token_id, new_prob)
+                            ai_memory[mem_key] = matching_sig
+                        else:
+                            logger.debug(f"[MONITOR] No fresh signal found for {t.city} token {t.token_id[:8]}...")
+
+            # 3b. Fetch ALL active markets for relevant cities (same as hourly scan)
+            from src.market_discovery import MarketDiscoverer
+            discoverer = MarketDiscoverer()
+            try:
+                all_markets = await discoverer.get_active_weather_markets()
+            except Exception as e:
+                logger.warning(f"[MONITOR] Failed to fetch full city markets: {e}. Using empty context.")
+                all_markets = []
 
             # Run all city batches concurrently
-            tasks = [process_monitor_city(city, trades) for city, trades in city_groups.items()]
+            tasks = [process_monitor_city(city, trades, all_markets) for city, trades in city_groups.items()]
             if tasks:
                 await asyncio.gather(*tasks)
 
             # 4. DECISION LOOP (Now with fresh probs)
             trades_sold = 0
-            GRACE_PERIOD_MINUTES = 60  # New trades are immune from exit logic for 1 hour
             async with httpx.AsyncClient() as http_client:
                 for trade in open_trades:
-                    # Grace period: skip exit checks for recently opened trades
-                    trade_age_minutes = (datetime.utcnow() - trade.created_at).total_seconds() / 60 if trade.created_at else 999
-                    if trade_age_minutes < GRACE_PERIOD_MINUTES:
-                        logger.debug(f"[MONITOR 10min] {trade.city} trade is {trade_age_minutes:.0f}min old — in grace period, skipping exit logic.")
-                        continue
-
                     mem_key = f"{trade.market_id}_{trade.token_id}"
                     mem = ai_memory.get(mem_key, {})
                     predicted_prob = mem.get('predicted_prob', None)

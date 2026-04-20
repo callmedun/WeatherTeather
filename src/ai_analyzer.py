@@ -28,8 +28,8 @@ class AIAnalyzer:
         
         logger.info(f"[AI] Initialized with {len(self.clients)} API keys.")
 
-        # Use gemma-4-31b-it — stable model for financial probability assessment.
-        self.fallback_models = ["gemma-4-31b-it"]
+        # Use gemini-2.5-flash-lite for speed.
+        self.fallback_models = ["gemini-2.5-flash-lite"]
             
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
         try:
