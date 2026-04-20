@@ -28,9 +28,7 @@ class AIAnalyzer:
         
         logger.info(f"[AI] Initialized with {len(self.clients)} API keys.")
 
-        # gemma-4-31b-it gives consistent, stable probability estimates.
-        # gemini-2.5-flash-lite is faster but demonstrated 30-55% swings on identical data.
-        self.fallback_models = ["gemma-4-31b-it"]
+        self.fallback_models = ["gemini-3.1-flash-lite-preview"]
             
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
         try:
