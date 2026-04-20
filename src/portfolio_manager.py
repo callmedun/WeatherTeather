@@ -468,7 +468,20 @@ class PortfolioManager:
                                     
                                     if old_prob is not None:
                                         shift = (new_prob - old_prob) * 100
-                                        logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {shift:+.1f}%")
+                                        # ANOMALY FILTER: clamp AI drifts > 25% per cycle
+                                        # These are model instability artefacts, not real market signals
+                                        MAX_SHIFT = 0.25
+                                        if abs(new_prob - old_prob) > MAX_SHIFT:
+                                            clamped_prob = old_prob + MAX_SHIFT * (1 if new_prob > old_prob else -1)
+                                            logger.warning(
+                                                f"[MONITOR] ⚠️ {city} ({date_str}) \"{t.outcome_name}\" "
+                                                f"Аномальный сдвиг ИИ {shift:+.1f}% — ограничен до {(clamped_prob-old_prob)*100:+.1f}%"
+                                            )
+                                            new_prob = clamped_prob
+                                            matching_sig['predicted_prob'] = new_prob
+                                        
+                                        effective_shift = (new_prob - old_prob) * 100
+                                        logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {effective_shift:+.1f}%")
                                     else:
                                         logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: [Нет старого] ➔ {new_prob*100:.1f}%")
                                 
@@ -484,8 +497,15 @@ class PortfolioManager:
 
             # 4. DECISION LOOP (Now with fresh probs)
             trades_sold = 0
+            GRACE_PERIOD_MINUTES = 60  # New trades are immune from exit logic for 1 hour
             async with httpx.AsyncClient() as http_client:
                 for trade in open_trades:
+                    # Grace period: skip exit checks for recently opened trades
+                    trade_age_minutes = (datetime.utcnow() - trade.created_at).total_seconds() / 60 if trade.created_at else 999
+                    if trade_age_minutes < GRACE_PERIOD_MINUTES:
+                        logger.debug(f"[MONITOR 10min] {trade.city} trade is {trade_age_minutes:.0f}min old — in grace period, skipping exit logic.")
+                        continue
+
                     mem_key = f"{trade.market_id}_{trade.token_id}"
                     mem = ai_memory.get(mem_key, {})
                     predicted_prob = mem.get('predicted_prob', None)
