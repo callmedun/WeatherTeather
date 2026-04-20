@@ -194,6 +194,7 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                 
                 if return_all:
                     # In re-analysis mode, return both YES and NO probabilities unconditionally
+                    reasoning = item.get("reasoning", "")
                     for out in m_config.get("outcomes", []):
                         out_name = out["name"]
                         p = calibrated_prob_yes if out_name.lower() == "yes" else (1.0 - calibrated_prob_yes)
@@ -204,7 +205,8 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                             "outcome_name": out_name,
                             "outcome_slug": out_name,
                             "predicted_prob": p,
-                            "city": city
+                            "city": city,
+                            "reasoning": reasoning  # Preserve AI reasoning for monitor logging
                         })
                 else:
                     # Original logic for finding BUY signals during Discovery
