@@ -28,8 +28,9 @@ class AIAnalyzer:
         
         logger.info(f"[AI] Initialized with {len(self.clients)} API keys.")
 
-        # Use gemini-2.5-flash-lite for speed.
-        self.fallback_models = ["gemini-2.5-flash-lite"]
+        # gemma-4-31b-it gives consistent, stable probability estimates.
+        # gemini-2.5-flash-lite is faster but demonstrated 30-55% swings on identical data.
+        self.fallback_models = ["gemma-4-31b-it"]
             
         self.system_prompt = "Calculate the TRUE probability for the market outcome based on weather arrays."
         try:
@@ -56,6 +57,8 @@ class AIAnalyzer:
             return []
             
         try:
+            from datetime import datetime, timezone
+
             # 1. Prepare Weather Data
             metar_raw = json.dumps(weather_data.get("metar", [])[:5])
             taf_raw = json.dumps(weather_data.get("taf", [])[:2])
@@ -63,7 +66,8 @@ class AIAnalyzer:
             gfs_hrrr = weather_data.get("gfs_hrrr_summary", "N/A")
             ensemble = weather_data.get("ensemble_summary", "N/A")
 
-            # 2. Build Markets List for Prompt
+            # 2. Build Markets List with hours_to_close per market
+            now_utc = datetime.now(timezone.utc)
             markets_context = []
             for i, m in enumerate(markets):
                 yes_price = 0.0
@@ -71,36 +75,59 @@ class AIAnalyzer:
                     if "yes" in out["name"].lower():
                         yes_price = out["current_price"]
                         break
-                markets_context.append(f"({i+1}) Market: {m.get('question')} | YES Price: {yes_price} | ID: {m['market_id']}")
+
+                # Compute hours until market closes
+                hours_str = "N/A"
+                res_date = m.get("resolution_date", "")
+                if res_date:
+                    try:
+                        dt_close = datetime.strptime(res_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        hours_left = (dt_close - now_utc).total_seconds() / 3600
+                        hours_str = f"{hours_left:.1f}h"
+                    except Exception:
+                        pass
+
+                markets_context.append(
+                    f"({i+1}) {m.get('question')} | YES Price: {yes_price} | Closes in: {hours_str} | ID: {m['market_id']}"
+                )
 
             markets_str = "\n".join(markets_context)
             
             content = f"""CITY: {city}
-WEATHER DATA:
-- METAR: {metar_raw}
-- TAF: {taf_raw}
-- ECMWF Forecast: {ecmwf}
-- GFS/HRRR Forecast: {gfs_hrrr}
-- Ensemble Mean: {ensemble}
 
-ACTIVE MARKETS TO ANALYZE (Total: {len(markets)}):
+=== WEATHER DATA ===
+METAR (latest observation): {metar_raw}
+TAF (terminal aerodrome forecast): {taf_raw}
+ECMWF Forecast (high-res): {ecmwf}
+GFS/HRRR Forecast: {gfs_hrrr}
+Ensemble Mean: {ensemble}
+
+=== ACTIVE TEMPERATURE MARKETS (Total: {len(markets)}) ===
 {markets_str}
 
-TASK:
-Analyze all {len(markets)} markets above. 
-Crucially: treat these as a unified probability distribution for {city}. For example, if you assign high probability to one temperature bucket, the others should be lower to maintain a realistic total distribution.
+=== YOUR TASK ===
+1. Treat ALL markets above as slices of ONE single probability distribution of the daily high temperature for {city}. The sum of your implied YES probabilities across all temperature bins must be realistic (close to 100% in aggregate — NOT each one at 90%+).
+2. Analyze consensus and disagreement between METAR, TAF, ECMWF, GFS/HRRR.
+3. Output ONE JSON object per market (return a flat JSON array, nothing else).
 
-RESPONSE FORMAT:
-Return a JSON array of objects. DO NOT follow the single-object schema from your system instructions. Instead, return a LIST of objects, where each object has this schema:
-{{
-  "market_id": "STRICTLY COPY FROM INPUT",
-  "true_probability": float (0.0 - 1.0),
-  "confidence": integer (0-100),
-  "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL",
-  "reasoning": "...",
-  "recommended_action": "BUY_YES" | "BUY_NO" | "SKIP",
-  "correction_applied": boolean
-}}
+=== REQUIRED OUTPUT FORMAT (strict JSON array) ===
+[
+  {{
+    "market_id": "STRICTLY COPY FROM INPUT — no changes",
+    "true_probability": <float 0.0–1.0 for the YES outcome>,
+    "confidence": <integer 0–100>,
+    "uncertainty_score": <float 0.00–1.00: 0=models fully agree, 1=complete chaos>,
+    "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL",
+    "recommended_action": "BUY_YES" | "BUY_NO" | "SKIP",
+    "reasoning": "<one concise sentence explaining WHY this probability>"
+  }},
+  ...
+]
+
+=== RULES ===
+- If uncertainty_score > 0.35 (models strongly disagree or spread is high) → use "SKIP" for recommended_action.
+- Never give BUY to adjacent temperature bins simultaneously (probability must flow to ONE winner).
+- Return ONLY the JSON array. No extra text.
 """
 
             max_keys = len(self.clients)
@@ -195,6 +222,7 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                 if return_all:
                     # In re-analysis mode, return both YES and NO probabilities unconditionally
                     reasoning = item.get("reasoning", "")
+                    uncertainty = item.get("uncertainty_score", None)
                     for out in m_config.get("outcomes", []):
                         out_name = out["name"]
                         p = calibrated_prob_yes if out_name.lower() == "yes" else (1.0 - calibrated_prob_yes)
@@ -206,13 +234,15 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                             "outcome_slug": out_name,
                             "predicted_prob": p,
                             "city": city,
-                            "reasoning": reasoning  # Preserve AI reasoning for monitor logging
+                            "reasoning": reasoning,
+                            "uncertainty_score": uncertainty
                         })
                 else:
                     # Original logic for finding BUY signals during Discovery
                     rec = item.get("recommended_action", "SKIP")
                     sentiment = item.get("sentiment", "NEUTRAL")
                     confidence = item.get("confidence", 0)
+                    uncertainty = item.get("uncertainty_score", 0.0) or 0.0
                     target_outcome_name = "Yes" if "YES" in rec.upper() else "No"
 
                     matched_out = next((o for o in m_config["outcomes"] if o["name"].lower() == target_outcome_name.lower()), None)
@@ -228,6 +258,11 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                     full_kelly = (edge_decimal / odds) if odds > 0 else 0
                     fractional_kelly = full_kelly * config.kelly_fraction if full_kelly > 0 else 0.0
 
+                    # Skip if AI itself signals high uncertainty or SKIP action
+                    if uncertainty > 0.35:
+                        logger.debug(f"[AI] Skipping {city} signal — uncertainty_score {uncertainty:.2f} > 0.35")
+                        continue
+
                     if ev > ev_threshold and fractional_kelly > 0 and confidence >= 82 and "BUY" in rec.upper():
                         final_signals.append({
                             "market_id": m_config["market_id"],
@@ -242,6 +277,7 @@ Return a JSON array of objects. DO NOT follow the single-object schema from your
                             "edge": edge_decimal * 100,
                             "kelly": fractional_kelly,
                             "confidence": confidence,
+                            "uncertainty_score": uncertainty,
                             "sentiment": sentiment,
                             "city": city
                         })
