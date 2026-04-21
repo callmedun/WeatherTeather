@@ -27,6 +27,8 @@ ICAO_COORDS = {
     "SBGR": (-23.4356, -46.4731),# Sao Paulo
     "KHOU": (29.6454, -95.2789), # Houston
     "VHHH": (22.3080, 113.9185), # Hong Kong
+    "EGLC": (51.5048,  0.0495),  # London City
+    "KDAL": (32.8473, -96.8517), # Dallas Love Field
 }
 
 class WeatherFetcher:

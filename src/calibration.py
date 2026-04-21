@@ -283,45 +283,61 @@ class SelfCalibration:
 
         lines.append(f"\n──────────────────\n📊 ОБЩИЙ РАСЧЕТНЫЙ PNL: {total_unrealized_pnl:+.2f}$")
         return "\n".join(lines)
-        
+
     def get_open_trades(self) -> str:
         # Legacy fallback
         return "📁 Пожалуйста, используйте async метод."
-        
+
     def get_closed_trades(self) -> str:
         """Returns formatted string of latest closed trades."""
         if not os.path.exists(self.filename):
             return "📜 История пуста."
-            
-        lines = []
+
+        # Deduplicate by token_id — multiple JSONL records can exist per trade
+        # (from repeated scans). Take the latest record per token.
+        token_records: dict = {}
         with open(self.filename, 'r', encoding='utf-8') as f:
             for line in f:
                 if not line.strip(): continue
-                r = json.loads(line)
-                if r.get("status") == "closed":
-                    # Calculate PnL first to determine the icon
-                    if r.get("realized_pnl") is not None:
-                        pnl = float(r["realized_pnl"])
-                    else:
-                        size = r.get('size_usd', 0)
-                        price = r.get('price_at_buy', 1.0)
-                        pnl = ((size / price) - size) if r.get("actual_outcome") is True else -size
-                    
-                    outcome_icon = "✅" if pnl > 0 else "❌"
-                    
-                    # Extract Date and Temperature (re-use logic)
-                    q_text = r.get("question", "")
-                    date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
-                    temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
-                    date_str = date_match.group(1) if date_match else "N/A"
-                    temp_str = temp_match.group(1).strip() if temp_match else "N/A"
+                try:
+                    r = json.loads(line)
+                    if r.get("status") == "closed" and r.get("token_id"):
+                        token_records[r["token_id"]] = r  # last write wins
+                except Exception:
+                    pass
 
-                    lines.append(f"{outcome_icon} {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']} | PnL: {pnl:+.2f}$\n"
-                                 f"  ↳ Вход: {r.get('size_usd',0):.2f}$ ({r.get('size_usd',0)/r.get('price_at_buy',1):.2f} sh) @ {r.get('price_at_buy',0):.3f}")
-        
-        if not lines:
+        if not token_records:
             return "📜 История пуста."
-        return "📜 ПОСЛЕДНИЕ ЗАКРЫТЫЕ СДЕЛКИ (до 15):\n\n" + "\n\n".join(lines[-15:])
+
+        closed = list(token_records.values())[-15:]
+        lines = []
+        for r in closed:
+            price_at_buy = r.get('price_at_buy', 0)
+            size_usd = r.get('size_usd', 0)
+            shares = size_usd / price_at_buy if price_at_buy > 0 else 0
+
+            if r.get("realized_pnl") is not None:
+                pnl = float(r["realized_pnl"])
+            else:
+                if price_at_buy > 0:
+                    pnl = ((size_usd / price_at_buy) - size_usd) if r.get("actual_outcome") is True else -size_usd
+                else:
+                    pnl = 0.0
+
+            outcome_icon = "✅" if pnl > 0 else "❌"
+
+            q_text = r.get("question", "")
+            date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
+            temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
+            date_str = date_match.group(1) if date_match else "N/A"
+            temp_str = temp_match.group(1).strip() if temp_match else "N/A"
+
+            lines.append(
+                f"{outcome_icon} {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']} | PnL: {pnl:+.2f}$\n"
+                f"  ⤷ Вход: {size_usd:.2f}$ ({shares:.2f} sh) @ {price_at_buy:.3f}"
+            )
+
+        return "📜 ПОСЛЕДНИЕ ЗАКРЫТЫЕ СДЕЛКИ (до 15):\n\n" + "\n\n".join(lines)
 
     def get_risk_summary(self) -> str:
         """Returns a string summary of current risk thresholds."""
@@ -347,50 +363,53 @@ class SelfCalibration:
         )
 
     def get_portfolio_stats(self, clob_client=None) -> str:
-        """Returns general portfolio math based on historical records."""
+        """Returns general portfolio stats based on historical records."""
         if not os.path.exists(self.filename):
             return "📊 Нет данных для статистики."
-            
-        total_trades = 0
+
+        # Deduplicate by token_id so repeated scan records don't inflate counts.
+        # Last record per token_id represents the final state.
+        token_records: dict = {}
+        with open(self.filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip(): continue
+                try:
+                    r = json.loads(line)
+                    if r.get("token_id"):
+                        token_records[r["token_id"]] = r
+                except Exception:
+                    pass
+
+        total_trades = len(token_records)
         wins = 0
         losses = 0
         pnl = 0.0
         ev_sum = 0.0
-        
-        with open(self.filename, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip(): continue
-                r = json.loads(line)
-                total_trades += 1
-                ev_sum += r.get("ev", 0.0)
-                
-                if r.get("status") == "closed":
+
+        for r in token_records.values():
+            ev_sum += r.get("ev", 0.0)
+
+            if r.get("status") == "closed":
+                price = r.get('price_at_buy', 0)
+                size = r.get('size_usd', 0)
+
+                if r.get("realized_pnl") is not None:
+                    trade_pnl = float(r["realized_pnl"])
+                elif price and price > 0:
+                    trade_pnl = ((size / price) - size) if r.get("actual_outcome") is True else -size
+                else:
                     trade_pnl = 0.0
-                    if r.get("realized_pnl") is not None:
-                        trade_pnl = r["realized_pnl"]
-                    else:
-                        size = r.get('size_usd', 0)
-                        price = r.get('price_at_buy', 1.0)
-                        if r.get("actual_outcome") is True:
-                            trade_pnl = ((size / price) - size)
-                        else:
-                            trade_pnl = -size
-                    
-                    pnl += trade_pnl
-                    if trade_pnl > 0:
-                        wins += 1
-                    elif trade_pnl < 0:
-                        losses += 1
-                    else:
-                        # Breakeven - we can decide to count as loss or win, 
-                        # but usually neutral trades are excluded or counted as losses.
-                        # We'll leave it out of both counters to not skew WR.
-                        pass
-                        
+
+                pnl += trade_pnl
+                if trade_pnl > 0:
+                    wins += 1
+                elif trade_pnl < 0:
+                    losses += 1
+
         resolved = wins + losses
         win_rate = (wins / resolved * 100) if resolved > 0 else 0
         avg_ev = (ev_sum / total_trades) if total_trades > 0 else 0
-        
+
         balance_str = "N/A (DRY_RUN)"
         if clob_client is not None and not config.dry_run:
             try:
@@ -407,7 +426,7 @@ class SelfCalibration:
             f"💰 Общий Баланс USDC: {balance_str}\n\n"
             f"📈 PNL Closed: {pnl:+.2f}$\n"
             f"🎯 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
-            f"🎲 Всего сделок: {total_trades}\n"
+            f"🎲 Всего сделок (unique): {total_trades}\n"
             f"🧠 Средний EV входа: {avg_ev:+.3f}\n"
         )
 
