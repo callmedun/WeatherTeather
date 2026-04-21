@@ -24,7 +24,9 @@ ICAO_COORDS = {
     "YSSY": (-33.9399, 151.1753),# Sydney
     "OMDB": (25.2532, 55.3657),  # Dubai
     "VABB": (19.0896, 72.8656),  # Mumbai
-    "SBGR": (-23.4356, -46.4731) # Sao Paulo
+    "SBGR": (-23.4356, -46.4731),# Sao Paulo
+    "KHOU": (29.6454, -95.2789), # Houston
+    "VHHH": (22.3080, 113.9185), # Hong Kong
 }
 
 class WeatherFetcher:

@@ -22,15 +22,19 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     """
     Parse bin boundaries and temperature unit from a Polymarket market question.
 
-    Handles formats such as:
-      - "Will the high be between 72°F and 73°F on April 20?"
-      - "Will the high be between 20 and 21°C on April 20?"
-      - "between 72 and 73 degrees Fahrenheit"
-      - "between 20-21°C"
+    Supported formats:
+      - "between X and Y °F/°C"       → bin [X, Y]
+      - "between X-Y"                  → bin [X, Y]
+      - "X to Y degrees"               → bin [X, Y]
+      - "be X°C or higher/above/more"  → bin [X, +999]  (open upper)
+      - "be X°C or lower/below/less"   → bin [-999, X+1] (open lower)
+      - "be X°C" (exact point)         → bin [X, X+1]
+      - "above X°" / "higher than X°"  → bin [X, +999]
+      - "below X°" / "lower than X°"   → bin [-999, X]
 
     Returns:
         (bin_low, bin_high, unit) — unit is 'F' or 'C'
-        None if parsing fails.
+        None if all patterns fail.
     """
     q_lower = question.lower()
 
@@ -40,8 +44,8 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     elif '°c' in q_lower or 'celsius' in q_lower:
         unit = 'C'
     else:
-        # Heuristic: if both bounds < 50 it's almost certainly Celsius
-        preview = re.search(r'between\s*([\d.]+)', question, re.IGNORECASE)
+        # Heuristic: first number < 50 → likely Celsius
+        preview = re.search(r'([\d.]+)', question)
         if preview:
             try:
                 unit = 'C' if float(preview.group(1)) < 50 else 'F'
@@ -50,8 +54,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
         else:
             unit = 'F'
 
-    # --- 2. Try multiple "between X and Y" patterns ---
-    # Pattern A: "between 72°F and 73°F"  /  "between 20 and 21°C"
+    # --- 2. Range patterns: "between X and Y" ---
     m = re.search(
         r'between\s+([\d.]+)\s*(?:°[FCfc])?\s+and\s+([\d.]+)',
         question, re.IGNORECASE
@@ -62,7 +65,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
         except ValueError:
             pass
 
-    # Pattern B: "between 72-73" or "between 20–21"
+    # "between X-Y" or "between X–Y"
     m = re.search(r'between\s+([\d.]+)\s*[-–]\s*([\d.]+)', question, re.IGNORECASE)
     if m:
         try:
@@ -70,7 +73,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
         except ValueError:
             pass
 
-    # Pattern C: "72 to 73 degrees" / "72 to 73°F"
+    # "X to Y degrees"
     m = re.search(
         r'([\d.]+)\s+to\s+([\d.]+)\s*(?:degrees?\s*)?(?:°[FCfc])?',
         question, re.IGNORECASE
@@ -78,6 +81,60 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     if m:
         try:
             return float(m.group(1)), float(m.group(2)), unit
+        except ValueError:
+            pass
+
+    # --- 3. Open-upper: "be X or higher/above/more" → [X, +inf) ---
+    m = re.search(
+        r'be\s+([\d.]+)\s*(?:°[FCfc])?\s+or\s+(?:higher|above|more)',
+        question, re.IGNORECASE
+    )
+    if m:
+        try:
+            return float(m.group(1)), 999.0, unit
+        except ValueError:
+            pass
+
+    # --- 4. Open-lower: "be X or lower/below/less" → (-inf, X] ---
+    m = re.search(
+        r'be\s+([\d.]+)\s*(?:°[FCfc])?\s+or\s+(?:lower|below|less)',
+        question, re.IGNORECASE
+    )
+    if m:
+        try:
+            return -999.0, float(m.group(1)) + 1.0, unit
+        except ValueError:
+            pass
+
+    # --- 5. Exact point: "be X°C" or "be X°F" → treat as [X, X+1) ---
+    # Must come AFTER open-upper/lower patterns to avoid false matches
+    m = re.search(r'be\s+([\d.]+)\s*°[FCfc]', question, re.IGNORECASE)
+    if m:
+        try:
+            t = float(m.group(1))
+            return t, t + 1.0, unit
+        except ValueError:
+            pass
+
+    # --- 6. Directional: "above X" / "higher than X" → open upper ---
+    m = re.search(
+        r'(?:above|higher\s+than)\s+([\d.]+)\s*(?:°[FCfc])?',
+        question, re.IGNORECASE
+    )
+    if m:
+        try:
+            return float(m.group(1)), 999.0, unit
+        except ValueError:
+            pass
+
+    # --- 7. Directional: "below X" / "lower than X" → open lower ---
+    m = re.search(
+        r'(?:below|lower\s+than)\s+([\d.]+)\s*(?:°[FCfc])?',
+        question, re.IGNORECASE
+    )
+    if m:
+        try:
+            return -999.0, float(m.group(1)), unit
         except ValueError:
             pass
 

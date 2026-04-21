@@ -418,19 +418,19 @@ class PortfolioManager:
                                 
                                 if old_prob is not None:
                                     shift = (new_prob - old_prob) * 100
-                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {shift:+.1f}%")
-                                    # Log reasoning for significant shifts
+                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | Вероятность: {old_prob*100:.1f}% ➔ {new_prob*100:.1f}% | Изменение: {shift:+.1f}%")
+                                    # Log reasoning for significant shifts (with math model this shows formula values)
                                     if abs(shift) >= 15:
                                         reasoning = matching_sig.get("reasoning", "")
                                         if reasoning:
                                             logger.warning(
-                                                f"[MONITOR] 🧠 ПРИЧИНА ИЗМЕНЕНИЯ для {city} ({date_str}) \"{t.outcome_name}\":\n"
+                                                f"[MONITOR] 🧮 ПРИЧИНА ИЗМЕНЕНИЯ для {city} ({date_str}) \"{t.outcome_name}\":\n"
                                                 f"           {reasoning}"
                                             )
                                         else:
-                                            logger.warning(f"[MONITOR] 🧠 Причина изменения {city} ({date_str}) \"{t.outcome_name}\": ИИ не объяснил.")
+                                            logger.warning(f"[MONITOR] 🧮 Изменение {city} ({date_str}) \"{t.outcome_name}\": данные расчёта недоступны.")
                                 else:
-                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | ИИ: [Нет старого] ➔ {new_prob*100:.1f}%")
+                                    logger.info(f"[MONITOR] 🔄 {city} ({date_str}) \"{t.outcome_name}\" | Вероятность: [первый расчёт] ➔ {new_prob*100:.1f}%")
                             
                             calibration_engine.update_prediction_prob(t.token_id, new_prob)
                             ai_memory[mem_key] = matching_sig
