@@ -147,7 +147,11 @@ class WeatherFetcher:
                 if r.status_code == 200:
                     data = r.json()
                     temps = data.get("daily", {}).get("temperature_2m_max", [])
-                    res_data["ecmwf_summary"] = f"Max temp forecast: {temps[0]}°C, trend stable / ECMWF IFS 0.4" if temps else "Data unavailable"
+                    if temps:
+                        res_data["ecmwf_summary"] = f"Max temp forecast: {temps[0]}°C, trend stable / ECMWF IFS 0.4"
+                        res_data["ecmwf_mean_c"] = float(temps[0])  # Numerical field for math model
+                    else:
+                        res_data["ecmwf_summary"] = "Data unavailable"
         except Exception as e:
             res_data["ecmwf_summary"] = f"Error: {e}"
 
@@ -159,7 +163,11 @@ class WeatherFetcher:
                 if r.status_code == 200:
                     data = r.json()
                     temps = data.get("daily", {}).get("temperature_2m_max", [])
-                    res_data["gfs_hrrr_summary"] = f"Max temp forecast: {temps[0]}°C / GFS Seamless" if temps else "Data unavailable"
+                    if temps:
+                        res_data["gfs_hrrr_summary"] = f"Max temp forecast: {temps[0]}°C / GFS Seamless"
+                        res_data["gfs_mean_c"] = float(temps[0])  # Numerical field for math model
+                    else:
+                        res_data["gfs_hrrr_summary"] = "Data unavailable"
         except Exception as e:
             res_data["gfs_hrrr_summary"] = f"Error: {e}"
 
@@ -179,9 +187,13 @@ class WeatherFetcher:
                                 members.append(val[0])
                     
                     if members:
+                        import statistics as stats_module
                         avg = round(sum(members) / len(members), 1)
-                        # We don't have easily calculated percentiles here, but we can give the mean consensus
+                        std = round(stats_module.stdev(members), 2) if len(members) > 1 else 2.0
                         res_data["ensemble_summary"] = f"Average ensemble max: {avg}°C across {len(members)} members."
+                        # Numerical fields for math model
+                        res_data["ensemble_mean_c"] = avg
+                        res_data["ensemble_std_c"] = std
         except Exception as e:
             res_data["ensemble_summary"] = f"Error: {e}"
 

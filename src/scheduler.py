@@ -34,9 +34,9 @@ class BotScheduler:
             f"⚙️ СТАТУС БОТА:\n\n"
             f"Режим: {mode_str}\n"
             f"Состояние: {pause_str}\n\n"
-            f"Ошибки ИИ (подряд): {ai_analyzer.consecutive_failures}\n\n"
+            f"Ошибки расчёта (подряд): {ai_analyzer.consecutive_failures}\n\n"
             f"⏱ Последний часовой скан:\n{fmt_time(self.last_scan_time)}\n\n"
-            f"⏱ Последний 10-мин мониторинг:\n{fmt_time(self.last_monitor_time)}"
+            f"⏱ Последний 2-мин мониторинг:\n{fmt_time(self.last_monitor_time)}"
         )
 
     async def scan_and_trade(self):
@@ -77,7 +77,8 @@ class BotScheduler:
                     logger.warning(f"Failed to fetch open_meteo for {icao}: {e}")
 
             # 3. Process cities using Batch AI Analysis
-            semaphore = asyncio.Semaphore(len(ai_analyzer.clients))
+            # Math model has no API clients — use a generous semaphore for parallelism
+            semaphore = asyncio.Semaphore(max(1, len(ai_analyzer.clients)) if ai_analyzer.clients else 8)
             
             async def process_city(city: str, icao: str) -> list[dict]:
                 async with semaphore:
@@ -182,13 +183,13 @@ class BotScheduler:
             max_instances=1
         )
         
-        # Schedule the 10-minute active trade monitor
+        # Schedule the 2-minute active trade monitor
         # max_instances=2 allows it to run alongside the hourly scan
-        logger.info("[SCHEDULER] monitor_open_trades started every 10 minutes")
+        logger.info("[SCHEDULER] monitor_open_trades started every 2 minutes")
         self.scheduler.add_job(
             self.monitor_open_trades_task,
             "interval",
-            minutes=10,
+            minutes=2,
             id="monitor_open_trades",
             replace_existing=True,
             max_instances=2
@@ -226,11 +227,11 @@ class BotScheduler:
 
     async def monitor_open_trades_task(self):
         from src.portfolio_manager import portfolio_manager
-        logger.info("[SCHEDULER] Running scheduled 10-minute open trades monitor...")
+        logger.info("[SCHEDULER] Running scheduled 2-minute open trades monitor...")
         try:
             await asyncio.wait_for(
                 portfolio_manager.monitor_open_trades(clob_client=trading_engine.client),
-                timeout=540  # 9 minutes hard cap — never exceeds interval
+                timeout=110  # 110s hard cap — never exceeds 2-minute interval
             )
             self.last_monitor_time = datetime.utcnow()
         except asyncio.TimeoutError:
