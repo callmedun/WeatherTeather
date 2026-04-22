@@ -289,55 +289,100 @@ class SelfCalibration:
         return "📁 Пожалуйста, используйте async метод."
 
     def get_closed_trades(self) -> str:
-        """Returns formatted string of latest closed trades."""
-        if not os.path.exists(self.filename):
+        """
+        Returns the last 15 closed trades with REAL execution data.
+        Entry price and size come from SQLite TradePosition (actual execution).
+        Question text, PnL, and outcome come from the JSONL prediction file.
+        """
+        # 1. Load JSONL for text fields and realized_pnl
+        jsonl_map: dict = {}
+        if os.path.exists(self.filename):
+            with open(self.filename, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if not line.strip(): continue
+                    try:
+                        r = json.loads(line)
+                        tid = r.get("token_id")
+                        if not tid: continue
+                        existing = jsonl_map.get(tid)
+                        # Prefer records that have realized_pnl set
+                        if existing is None or r.get("realized_pnl") is not None:
+                            jsonl_map[tid] = r
+                    except Exception:
+                        pass
+
+        # 2. Get real execution data from SQLite
+        from src.portfolio_manager import TradePosition
+        session = portfolio_manager.Session()
+        try:
+            db_trades = {
+                t.token_id: t
+                for t in session.query(TradePosition).filter(
+                    TradePosition.status != "OPEN"
+                ).all()
+            }
+        except Exception as e:
+            logger.error(f"Error reading SQLite for closed trades: {e}")
+            db_trades = {}
+        finally:
+            session.close()
+
+        # 3. Merge: use all known token_ids from both sources
+        all_tokens = list(set(list(jsonl_map.keys()) + list(db_trades.keys())))
+        if not all_tokens:
             return "📜 История пуста."
 
-        # Deduplicate by token_id — multiple JSONL records can exist per trade
-        # (from repeated scans). Take the latest record per token.
-        token_records: dict = {}
-        with open(self.filename, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip(): continue
-                try:
-                    r = json.loads(line)
-                    if r.get("status") == "closed" and r.get("token_id"):
-                        token_records[r["token_id"]] = r  # last write wins
-                except Exception:
-                    pass
+        merged = []
+        for tid in all_tokens:
+            jrec   = jsonl_map.get(tid, {})
+            db_obj = db_trades.get(tid)
 
-        if not token_records:
-            return "📜 История пуста."
+            # Skip if still open everywhere
+            if jrec.get("status") == "open" and db_obj is None:
+                continue
+            if jrec.get("status") == "open" and db_obj is not None and db_obj.status == "OPEN":
+                continue
+            if not jrec and db_obj is None:
+                continue
 
-        closed = list(token_records.values())[-15:]
-        lines = []
-        for r in closed:
-            price_at_buy = r.get('price_at_buy', 0)
-            size_usd = r.get('size_usd', 0)
-            shares = size_usd / price_at_buy if price_at_buy > 0 else 0
-
-            if r.get("realized_pnl") is not None:
-                pnl = float(r["realized_pnl"])
+            # Execution data: SQLite first (real execution), JSONL as fallback
+            if db_obj and db_obj.entry_price and db_obj.entry_price > 0:
+                price_at_buy = db_obj.entry_price
+                size_usd     = db_obj.size_usd or 0.0
             else:
-                if price_at_buy > 0:
-                    pnl = ((size_usd / price_at_buy) - size_usd) if r.get("actual_outcome") is True else -size_usd
-                else:
-                    pnl = 0.0
+                price_at_buy = jrec.get("price_at_buy", 0.0) or 0.0
+                size_usd     = jrec.get("size_usd", 0.0) or 0.0
 
-            outcome_icon = "✅" if pnl > 0 else "❌"
+            shares = size_usd / price_at_buy if price_at_buy > 0 else 0.0
 
-            q_text = r.get("question", "")
+            realized_pnl = jrec.get("realized_pnl")
+            pnl = float(realized_pnl) if realized_pnl is not None else 0.0
+            outcome_icon = "✅" if pnl > 0 else ("❌" if pnl < 0 else "⚪")
+
+            q_text         = jrec.get("question", "")
+            city           = jrec.get("city") or (db_obj.city if db_obj else "?")
+            bought_outcome = jrec.get("bought_outcome") or (db_obj.outcome_name if db_obj else "?")
+
             date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
             temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
-            date_str = date_match.group(1) if date_match else "N/A"
-            temp_str = temp_match.group(1).strip() if temp_match else "N/A"
+            date_str   = date_match.group(1) if date_match else "?"
+            temp_str   = temp_match.group(1).strip() if temp_match else q_text[:30]
 
-            lines.append(
-                f"{outcome_icon} {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']} | PnL: {pnl:+.2f}$\n"
-                f"  ⤷ Вход: {size_usd:.2f}$ ({shares:.2f} sh) @ {price_at_buy:.3f}"
-            )
+            merged.append({
+                "line": (
+                    f"{outcome_icon} {city} | {date_str} [{temp_str}] | {bought_outcome} | PnL: {pnl:+.2f}$\n"
+                    f"  ⤷ Вход: {size_usd:.2f}$ ({shares:.2f} sh) @ {price_at_buy:.3f}"
+                ),
+                "sort_key": jrec.get("timestamp", ""),
+            })
 
+        if not merged:
+            return "📜 История пуста."
+
+        merged.sort(key=lambda x: x["sort_key"])
+        lines = [m["line"] for m in merged[-15:]]
         return "📜 ПОСЛЕДНИЕ ЗАКРЫТЫЕ СДЕЛКИ (до 15):\n\n" + "\n\n".join(lines)
+
 
     def get_risk_summary(self) -> str:
         """Returns a string summary of current risk thresholds."""

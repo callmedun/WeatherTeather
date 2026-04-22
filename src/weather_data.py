@@ -36,7 +36,9 @@ class WeatherFetcher:
         self.base_url_metar = "https://aviationweather.gov/api/data/metar"
         self.base_url_taf = "https://aviationweather.gov/api/data/taf"
         self.cache: Dict[str, Dict[str, Any]] = {}
-        self.cache_ttl = 3600  # 1 hour cache
+        self.cache_ttl = 1200  # 20 minutes — METAR updates every 20-30 min
+        self.open_meteo_cache: Dict[str, Any] = {}
+        self.open_meteo_cache_ttl = 10800  # 3 hours — models update every 6h
 
     async def fetch_weather_for_icao(self, icao_codes: List[str]) -> Optional[Dict[str, Dict[str, Any]]]:
         """
@@ -124,18 +126,16 @@ class WeatherFetcher:
                 
         return results
 
-        # Update cache for successful results
-        for icao, data in results.items():
-            if data["metar"] or data["taf"]:
-                self.cache[icao] = data
-                
-        return results
-
-    async def fetch_open_meteo(self, icao: str) -> Dict[str, str]:
+    async def fetch_open_meteo(self, icao: str) -> Dict[str, Any]:
         """
-        Fetches latitude/longitude mapping from ICAO and hits Open-Meteo models
-        Specifically formats for the AI Multi-Source analysis prompt.
+        Fetches ECMWF, GFS and Ensemble forecasts from Open-Meteo.
+        Results are cached for 3 hours (models update every 6h).
+        Returns a dict with both summary strings and numerical fields.
         """
+        import time as time_module
+        cached = self.open_meteo_cache.get(icao)
+        if cached and time_module.time() - cached.get("_fetched_at", 0) < self.open_meteo_cache_ttl:
+            return cached
         res_data = {"ecmwf_summary": "", "gfs_hrrr_summary": "", "ensemble_summary": ""}
         coords = ICAO_COORDS.get(icao)
         if not coords:
@@ -201,6 +201,9 @@ class WeatherFetcher:
         except Exception as e:
             res_data["ensemble_summary"] = f"Error: {e}"
 
+        import time as time_module
+        res_data["_fetched_at"] = time_module.time()
+        self.open_meteo_cache[icao] = res_data
         return res_data
 
     def get_weather_for_icao(self, icao: str) -> Dict[str, Any]:
