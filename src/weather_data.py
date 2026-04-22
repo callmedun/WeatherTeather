@@ -144,13 +144,14 @@ class WeatherFetcher:
         lat, lon = coords
         FORECAST_DAYS = 4  # cover today + 3 future days for markets resolving up to ~4 days out
 
-        # ── 1. ECMWF IFS — 4 days ────────────────────────────────────────────
-        ecmwf_daily: list[float | None] = [None] * FORECAST_DAYS
+        # ── 1. ECMWF IFS — 4 days (Max & Min) ────────────────────────────────
+        ecmwf_max_daily: list[float | None] = [None] * FORECAST_DAYS
+        ecmwf_min_daily: list[float | None] = [None] * FORECAST_DAYS
         try:
             url = (
                 f"https://api.open-meteo.com/v1/forecast"
                 f"?latitude={lat}&longitude={lon}"
-                f"&daily=temperature_2m_max"
+                f"&daily=temperature_2m_max,temperature_2m_min"
                 f"&models=ecmwf_ifs04"
                 f"&forecast_days={FORECAST_DAYS}"
                 f"&timezone=auto"
@@ -158,20 +159,23 @@ class WeatherFetcher:
             async with httpx.AsyncClient() as client:
                 r = await client.get(url, timeout=12.0)
                 if r.status_code == 200:
-                    temps = r.json().get("daily", {}).get("temperature_2m_max", [])
-                    for i in range(min(FORECAST_DAYS, len(temps))):
-                        if temps[i] is not None:
-                            ecmwf_daily[i] = float(temps[i])
+                    daily = r.json().get("daily", {})
+                    maxs = daily.get("temperature_2m_max", [])
+                    mins = daily.get("temperature_2m_min", [])
+                    for i in range(min(FORECAST_DAYS, len(maxs))):
+                        if maxs[i] is not None: ecmwf_max_daily[i] = float(maxs[i])
+                        if i < len(mins) and mins[i] is not None: ecmwf_min_daily[i] = float(mins[i])
         except Exception:
             pass
 
-        # ── 2. GFS Seamless — 4 days ─────────────────────────────────────────
-        gfs_daily: list[float | None] = [None] * FORECAST_DAYS
+        # ── 2. GFS Seamless — 4 days (Max & Min) ─────────────────────────────
+        gfs_max_daily: list[float | None] = [None] * FORECAST_DAYS
+        gfs_min_daily: list[float | None] = [None] * FORECAST_DAYS
         try:
             url = (
                 f"https://api.open-meteo.com/v1/forecast"
                 f"?latitude={lat}&longitude={lon}"
-                f"&daily=temperature_2m_max"
+                f"&daily=temperature_2m_max,temperature_2m_min"
                 f"&models=gfs_seamless"
                 f"&forecast_days={FORECAST_DAYS}"
                 f"&timezone=auto"
@@ -179,21 +183,24 @@ class WeatherFetcher:
             async with httpx.AsyncClient() as client:
                 r = await client.get(url, timeout=12.0)
                 if r.status_code == 200:
-                    temps = r.json().get("daily", {}).get("temperature_2m_max", [])
-                    for i in range(min(FORECAST_DAYS, len(temps))):
-                        if temps[i] is not None:
-                            gfs_daily[i] = float(temps[i])
+                    daily = r.json().get("daily", {})
+                    maxs = daily.get("temperature_2m_max", [])
+                    mins = daily.get("temperature_2m_min", [])
+                    for i in range(min(FORECAST_DAYS, len(maxs))):
+                        if maxs[i] is not None: gfs_max_daily[i] = float(maxs[i])
+                        if i < len(mins) and mins[i] is not None: gfs_min_daily[i] = float(mins[i])
         except Exception:
             pass
 
-        # ── 3. ECMWF Ensemble (51 members) — per-day mean & std ──────────────
-        ens_daily:     list[float | None] = [None] * FORECAST_DAYS
-        ens_std_daily: list[float | None] = [None] * FORECAST_DAYS
+        # ── 3. ECMWF Ensemble (51 members) — per-day mean & std (Max & Min) ──
+        ens_max_daily:     list[float | None] = [None] * FORECAST_DAYS
+        ens_max_std_daily: list[float | None] = [None] * FORECAST_DAYS
+        ens_min_daily:     list[float | None] = [None] * FORECAST_DAYS
         try:
             url = (
                 f"https://ensemble-api.open-meteo.com/v1/ensemble"
                 f"?latitude={lat}&longitude={lon}"
-                f"&daily=temperature_2m_max"
+                f"&daily=temperature_2m_max,temperature_2m_min"
                 f"&models=ecmwf_ensemble"
                 f"&forecast_days={FORECAST_DAYS}"
                 f"&timezone=auto"
@@ -202,42 +209,41 @@ class WeatherFetcher:
                 r = await client.get(url, timeout=15.0)
                 if r.status_code == 200:
                     daily_block = r.json().get("daily", {})
-                    # Collect all member arrays (keys contain "temperature_2m_max")
-                    member_arrays = [
-                        v for k, v in daily_block.items()
-                        if "temperature_2m_max" in k and isinstance(v, list)
-                    ]
-                    if member_arrays:
-                        import statistics as stats_module
-                        # Compute per-day across all members
-                        for d in range(FORECAST_DAYS):
-                            day_vals = [
-                                float(arr[d])
-                                for arr in member_arrays
-                                if len(arr) > d and arr[d] is not None
-                            ]
-                            if day_vals:
-                                ens_daily[d]     = round(sum(day_vals) / len(day_vals), 1)
-                                ens_std_daily[d] = round(
-                                    stats_module.stdev(day_vals) if len(day_vals) > 1 else 0.0,
-                                    2
-                                )
+                    # Max stats
+                    max_members = [v for k, v in daily_block.items() if "temperature_2m_max" in k and isinstance(v, list)]
+                    # Min stats
+                    min_members = [v for k, v in daily_block.items() if "temperature_2m_min" in k and isinstance(v, list)]
+                    
+                    import statistics as stats_module
+                    for d in range(FORECAST_DAYS):
+                        # Max
+                        m_vals = [float(arr[d]) for arr in max_members if len(arr) > d and arr[d] is not None]
+                        if m_vals:
+                            ens_max_daily[d] = round(sum(m_vals)/len(m_vals), 1)
+                            ens_max_std_daily[d] = round(stats_module.stdev(m_vals) if len(m_vals) > 1 else 0.0, 2)
+                        # Min
+                        n_vals = [float(arr[d]) for arr in min_members if len(arr) > d and arr[d] is not None]
+                        if n_vals:
+                            ens_min_daily[d] = round(sum(n_vals)/len(n_vals), 1)
         except Exception:
             pass
 
-        # ── 4. Package results ────────────────────────────────────────────────
+        # ── 4. Package results ───────────────────────────────────────────────
         res_data["forecast_daily"] = {
-            "ecmwf":        ecmwf_daily,
-            "gfs":          gfs_daily,
-            "ensemble":     ens_daily,
-            "ensemble_std": ens_std_daily,
+            "ecmwf_max":    ecmwf_max_daily,
+            "ecmwf_min":    ecmwf_min_daily,
+            "gfs_max":      gfs_max_daily,
+            "gfs_min":      gfs_min_daily,
+            "ensemble_max": ens_max_daily,
+            "ensemble_std": ens_max_std_daily,
+            "ensemble_min": ens_min_daily,
         }
 
         # Backward-compat single-value fields (day-0 = today)
-        res_data["ecmwf_mean_c"]    = ecmwf_daily[0]
-        res_data["gfs_mean_c"]      = gfs_daily[0]
-        res_data["ensemble_mean_c"] = ens_daily[0]
-        res_data["ensemble_std_c"]  = ens_std_daily[0]
+        res_data["ecmwf_mean_c"]    = ecmwf_max_daily[0]
+        res_data["gfs_mean_c"]      = gfs_max_daily[0]
+        res_data["ensemble_mean_c"] = ens_max_daily[0]
+        res_data["ensemble_std_c"]  = ens_max_std_daily[0]
 
         res_data["_fetched_at"] = time_module.time()
         self.open_meteo_cache[icao] = res_data

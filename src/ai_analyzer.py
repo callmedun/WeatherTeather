@@ -116,15 +116,23 @@ class AIAnalyzer:
         try:
             # ── 1. Pull per-source daily forecast arrays ─────────────────────
             forecast_daily = weather_data.get("forecast_daily", {})
-            ecmwf_arr  = forecast_daily.get("ecmwf",        [])
-            gfs_arr    = forecast_daily.get("gfs",           [])
-            ens_arr    = forecast_daily.get("ensemble",      [])
-            std_arr    = forecast_daily.get("ensemble_std",  [])
+            
+            # Max arrays
+            ecmwf_max_arr = forecast_daily.get("ecmwf_max",    [])
+            gfs_max_arr   = forecast_daily.get("gfs_max",      [])
+            ens_max_arr   = forecast_daily.get("ensemble_max", [])
+            
+            # Min arrays
+            ecmwf_min_arr = forecast_daily.get("ecmwf_min",    [])
+            gfs_min_arr   = forecast_daily.get("gfs_min",      [])
+            ens_min_arr   = forecast_daily.get("ensemble_min", [])
+
+            std_arr = forecast_daily.get("ensemble_std", [])
 
             # Require at least one model has day-0 data
             has_day0 = any(
                 arr and len(arr) > 0 and arr[0] is not None
-                for arr in [ecmwf_arr, gfs_arr, ens_arr]
+                for arr in [ecmwf_max_arr, gfs_max_arr, ens_max_arr]
             )
             if not has_day0:
                 logger.warning(
@@ -162,37 +170,46 @@ class AIAnalyzer:
                 htc     = _hours_to_close(m)
                 day_idx = _day_idx(htc)
 
-                # ── 4a. Pick the correct forecast day for each model ──────────
-                ecmwf_c = _safe_day(ecmwf_arr, day_idx)
-                gfs_c   = _safe_day(gfs_arr,   day_idx)
-                ens_c   = _safe_day(ens_arr,   day_idx)
-                ens_std = _safe_day(std_arr,   day_idx)
+                # ── 4a. Pick the correct forecast day and subset (Max vs Min) ──
+                if is_low_market:
+                    e_c = _safe_day(ecmwf_min_arr, day_idx)
+                    g_c = _safe_day(gfs_min_arr,   day_idx)
+                    s_c = _safe_day(ens_min_arr,   day_idx)
+                else:
+                    e_c = _safe_day(ecmwf_max_arr, day_idx)
+                    g_c = _safe_day(gfs_max_arr,   day_idx)
+                    s_c = _safe_day(ens_max_arr,   day_idx)
+                
+                ens_std = _safe_day(std_arr, day_idx)
 
-                model_means = [v for v in [ens_c, ecmwf_c, gfs_c] if v is not None]
+                model_means = [v for v in [s_c, e_c, g_c] if v is not None]
                 if not model_means:
                     continue  # no forecast at all for this day
 
                 blended_mean_c = sum(model_means) / len(model_means)
 
                 # ── 4b. Uncertainty (grows with forecast horizon) ─────────────
-                # Base: 0.5°C same-day, +0.5°C per day out
                 base_std = 0.5 + day_idx * 0.5
                 if ens_std is not None:
-                    # Real 51-member ensemble spread for this specific day
                     std_c = max(base_std, ens_std)
                 elif len(model_means) >= 2:
-                    # Use inter-model spread + growing base
                     model_spread = max(abs(v - blended_mean_c) for v in model_means)
                     std_c = max(base_std + day_idx * 0.5, model_spread)
                 else:
-                    # Single model only
                     std_c = base_std + day_idx * 0.5 + 1.0
 
                 # ── 4c. METAR relevance at this horizon ───────────────────────
-                # Beyond 30h, today's observed high is not meaningful
                 metar_high_for_calc = metar_high_c if htc <= 30 else blended_mean_c
                 if metar_high_for_calc is None:
                     metar_high_for_calc = blended_mean_c
+
+                # ── 4d. TAF Fallback (Alternative TAF for US cities) ──────────
+                # If TAF is missing (TX/TN not in string), use ECMWF IFS daily forecast
+                # for that specific day as a deterministic 'point forecast'.
+                if is_low_market:
+                    raw_taf = taf_min_c if taf_min_c is not None else e_c
+                else:
+                    raw_taf = taf_max_c if taf_max_c is not None else e_c
 
                 # Convert all Celsius values to match the market's unit
                 if unit == "F":
@@ -200,14 +217,13 @@ class AIAnalyzer:
                     es  = std_c * 9 / 5
                     mh  = celsius_to_fahrenheit(metar_high_for_calc)
                     hb  = 0.0
-                    taf_val = celsius_to_fahrenheit(taf_min_c) if (is_low_market and taf_min_c is not None) else (
-                              celsius_to_fahrenheit(taf_max_c) if (not is_low_market and taf_max_c is not None) else None)
+                    taf_val = celsius_to_fahrenheit(raw_taf) if raw_taf is not None else None
                 else:
                     em  = blended_mean_c
                     es  = std_c
                     mh  = metar_high_for_calc
                     hb  = historical_bias_c
-                    taf_val = taf_min_c if is_low_market else taf_max_c
+                    taf_val = raw_taf
 
                 true_prob_yes = calculate_bin_probability(
                     ensemble_mean     = em,
