@@ -142,6 +142,21 @@ class TradingEngine:
                 logger.info(f"Skipping trade: Market price ({best_ask_price}) indicates outcome is highly resolved.")
                 return
 
+        # --- Coverage guardrail ---
+        # Skip when weather model covers < 20% of prob space (incomplete data)
+        MIN_COVERAGE = float(getattr(config, "tsas_min_coverage", 0.20))
+        _cov = analysis.get("family_raw_sum")
+        if (
+            analysis_model in ("tsas", "tsas+bma")
+            and isinstance(_cov, (int, float))
+            and _cov < MIN_COVERAGE
+        ):
+            logger.warning(
+                f"[COVERAGE SKIP] {trade_context} | "
+                f"coverage={_cov*100:.1f}% < {MIN_COVERAGE*100:.0f}% — weather data incomplete."
+            )
+            return
+
         # --- Phase 3 BMA-Aware Entry Gate ---
         bankroll = float(getattr(portfolio_manager, "total_capital", 1000.0) or 1000.0)
         city_exp = sum(float(t.size_usd or 0.0) for t in portfolio_manager.get_open_trades_for_city(city))
