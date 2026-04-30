@@ -144,7 +144,7 @@ class TradingEngine:
 
         # --- Phase 3 BMA-Aware Entry Gate ---
         bankroll = float(getattr(portfolio_manager, "total_capital", 1000.0) or 1000.0)
-        city_exp = sum(float(t.invested) for t in portfolio_manager.get_open_trades_for_city(city))
+        city_exp = sum(float(t.size_usd or 0.0) for t in portfolio_manager.get_open_trades_for_city(city))
         total_exp = float(getattr(portfolio_manager, "current_exposure", 0.0) or 0.0)
         p3 = evaluate_entry(analysis, bankroll=bankroll,
                             city_exposure=city_exp, total_exposure=total_exp)
