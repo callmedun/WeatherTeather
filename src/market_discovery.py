@@ -114,6 +114,22 @@ class MarketDiscoverer:
                 import json
                 prices = json.loads(prices)
             
+            best_ask = None
+            best_bid = None
+            try:
+                raw_best_ask = market.get("bestAsk")
+                if raw_best_ask not in (None, "", "null"):
+                    best_ask = float(raw_best_ask)
+            except (ValueError, TypeError):
+                best_ask = None
+
+            try:
+                raw_best_bid = market.get("bestBid")
+                if raw_best_bid not in (None, "", "null"):
+                    best_bid = float(raw_best_bid)
+            except (ValueError, TypeError):
+                best_bid = None
+
             # Map Yes/No or range outcomes
             parsed_outcomes = []
             for i, outcome in enumerate(outcomes):
@@ -144,6 +160,21 @@ class MarketDiscoverer:
 
             # Check resolution date
             end_date = market.get("endDate", "")
+            spread = None
+            midpoint = None
+            if best_ask is not None and best_bid is not None and best_ask > 0 and best_bid >= 0:
+                midpoint = (best_ask + best_bid) / 2.0
+                spread = max(0.0, best_ask - best_bid)
+
+            volume_24h = None
+            for key in ("volume24hr", "volume24h", "oneDayVolume", "volume"):
+                try:
+                    raw_volume = market.get(key)
+                    if raw_volume not in (None, "", "null"):
+                        volume_24h = float(raw_volume)
+                        break
+                except (ValueError, TypeError):
+                    continue
             
             return {
                 "market_id": market.get("conditionId"),
@@ -152,6 +183,11 @@ class MarketDiscoverer:
                 "city": city,
                 "icao_code": config.city_icao_mapping.get(city),
                 "resolution_date": end_date,
+                "best_ask": best_ask,
+                "best_bid": best_bid,
+                "spread": spread,
+                "midpoint": midpoint,
+                "daily_volume": volume_24h,
                 "outcomes": parsed_outcomes
             }
         except Exception as e:

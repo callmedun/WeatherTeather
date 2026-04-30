@@ -25,6 +25,7 @@ from src.probability_calculator import (
     extract_taf_min_c,
     celsius_to_fahrenheit,
 )
+from src.tsas_model import analyze_city_tsas
 
 
 def _hours_to_close(market: dict) -> float:
@@ -91,7 +92,10 @@ class AIAnalyzer:
     def __init__(self):
         self.clients = []
         self.consecutive_failures = 0
-        logger.info("[MATH] Initialized: TAF + METAR + Ensemble blended probability model.")
+        if getattr(config, "analysis_model", "tsas").lower() == "tsas":
+            logger.info("[TSAS] Initialized: stochastic TAF + METAR + Ensemble probability model.")
+        else:
+            logger.info("[MATH] Initialized: TAF + METAR + Ensemble blended probability model.")
 
     async def analyze_city_batch(
         self,
@@ -113,6 +117,24 @@ class AIAnalyzer:
         Returns:
             List of signal dicts compatible with the rest of the pipeline.
         """
+        if getattr(config, "analysis_model", "tsas").lower() == "tsas":
+            try:
+                signals = analyze_city_tsas(
+                    city,
+                    markets,
+                    weather_data,
+                    return_all=return_all,
+                    monitor_mode=return_all,
+                )
+                self.consecutive_failures = 0
+                if not return_all:
+                    logger.info(f"[TSAS] {city}: {len(markets)} markets -> {len(signals)} signals")
+                return signals
+            except Exception as e:
+                logger.error(f"[TSAS] Batch analysis error for {city}: {e}")
+                self.consecutive_failures += 1
+                return []
+
         try:
             # ── 1. Pull per-source daily forecast arrays ─────────────────────
             forecast_daily = weather_data.get("forecast_daily", {})

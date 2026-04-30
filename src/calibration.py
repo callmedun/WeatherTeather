@@ -7,6 +7,7 @@ from typing import Dict, Any, List
 from src.portfolio_manager import portfolio_manager
 from src.utils import logger
 from config.settings import config
+from src.probability_calculator import parse_temperature_bin
 
 class SelfCalibration:
     def __init__(self):
@@ -18,6 +19,29 @@ class SelfCalibration:
         if not os.path.exists(self.filename):
             with open(self.filename, 'w', encoding='utf-8') as f:
                 pass
+
+    def _format_temp_value(self, value: float) -> str:
+        if abs(value - round(value)) < 0.05:
+            return str(int(round(value)))
+        return f"{value:.1f}"
+
+    def _extract_market_date(self, question: str) -> str:
+        match = re.search(r'\bon\s+([A-Za-z]+\s+\d+)', question or "")
+        return match.group(1) if match else "N/A"
+
+    def _format_market_bin(self, question: str) -> str:
+        parsed = parse_temperature_bin(question or "")
+        if parsed is None:
+            return "N/A"
+
+        low, high, unit = parsed
+        if low <= -999:
+            return f"<= {self._format_temp_value(high - 0.5)}{unit}"
+        if high >= 999:
+            return f">= {self._format_temp_value(low + 0.5)}{unit}"
+        if abs((high - low) - 1.0) < 0.05:
+            return f"{self._format_temp_value(low + 0.5)}{unit}"
+        return f"{self._format_temp_value(low + 0.5)}-{self._format_temp_value(high - 0.5)}{unit}"
                 
     def save_prediction(self, *args, **kwargs):
         """
@@ -34,6 +58,7 @@ class SelfCalibration:
                     "icao": sig.get("icao_code", sig.get("icao", "")),
                     "question": sig.get("question", ""),
                     "predicted_prob": sig.get("predicted_prob", 0.0),
+                    "entry_predicted_prob": sig.get("entry_predicted_prob", sig.get("predicted_prob", 0.0)),
                     "ev": sig.get("ev", 0.0),
                     "bought_outcome": sig.get("outcome_slug", sig.get("bought_outcome", "")),
                     "price_at_buy": sig.get("eff_price", sig.get("price_at_buy", 0.0)),
@@ -41,7 +66,8 @@ class SelfCalibration:
                     "timestamp": datetime.utcnow().isoformat(),
                     "status": sig.get("status", "open"),
                     "actual_outcome": sig.get("actual_outcome", None),
-                    "outcomes": sig.get("outcomes", [])
+                    "outcomes": sig.get("outcomes", []),
+                    "analysis_model": sig.get("analysis_model", "")
                 }
             else:
                 # Fallback to positional (keeping original order for compatibility)
@@ -53,13 +79,15 @@ class SelfCalibration:
                     "icao": args[3] if len(args) > 3 else kwargs.get("icao"),
                     "question": args[4] if len(args) > 4 else kwargs.get("question"),
                     "predicted_prob": args[5] if len(args) > 5 else kwargs.get("predicted_prob"),
+                    "entry_predicted_prob": args[5] if len(args) > 5 else kwargs.get("entry_predicted_prob", kwargs.get("predicted_prob")),
                     "bought_outcome": args[6] if len(args) > 6 else kwargs.get("bought_outcome"),
                     "price_at_buy": args[7] if len(args) > 7 else kwargs.get("price_at_buy"),
                     "ev": args[8] if len(args) > 8 else kwargs.get("ev", 0.0),
                     "size_usd": args[9] if len(args) > 9 else kwargs.get("size_usd", 0.0),
                     "timestamp": datetime.utcnow().isoformat(),
                     "status": "open",
-                    "actual_outcome": None
+                    "actual_outcome": None,
+                    "analysis_model": kwargs.get("analysis_model", "")
                 }
             
             with open(self.filename, 'a', encoding='utf-8') as f:
@@ -267,13 +295,9 @@ class SelfCalibration:
                 market_str = "(ошибка получения цены)"
                 edge_str = ""
                 
-            # Extract Date and Temperature from question (fixed regex)
             q_text = r.get("question", "")
-            date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
-            temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
-            
-            date_str = date_match.group(1) if date_match else "N/A"
-            temp_str = temp_match.group(1).strip() if temp_match else "N/A"
+            date_str = self._extract_market_date(q_text)
+            temp_str = self._format_market_bin(q_text)
             
             lines.append(f"• {r['city']} | {date_str} [{temp_str}] | {r['bought_outcome']}\n"
                          f"  ↳ Вход: {shares:.2f} shares @ {entry_price:.3f}\n"
@@ -537,6 +561,536 @@ class SelfCalibration:
         except Exception as e:
             logger.error(f"Error calculating balance summary: {e}")
             return "Ошибка при расчете баланса."
+        finally:
+            session.close()
+
+    def _load_latest_records_by_token(self) -> dict:
+        records = {}
+        if not os.path.exists(self.filename):
+            return records
+
+        with open(self.filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+
+                token_id = record.get("token_id")
+                if not token_id:
+                    continue
+
+                existing = records.get(token_id)
+                record_ts = record.get("timestamp", "")
+                existing_ts = existing.get("timestamp", "") if existing else ""
+                if existing is None or record_ts >= existing_ts:
+                    records[token_id] = record
+
+        return records
+
+    def _load_best_closed_records_by_token(self) -> dict:
+        records = {}
+        if not os.path.exists(self.filename):
+            return records
+
+        with open(self.filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+
+                token_id = record.get("token_id")
+                if not token_id:
+                    continue
+
+                existing = records.get(token_id)
+                score = (
+                    1 if record.get("status") == "closed" else 0,
+                    1 if record.get("realized_pnl") is not None else 0,
+                    record.get("timestamp", ""),
+                )
+                existing_score = (
+                    1 if existing and existing.get("status") == "closed" else 0,
+                    1 if existing and existing.get("realized_pnl") is not None else 0,
+                    existing.get("timestamp", "") if existing else "",
+                )
+                if existing is None or score >= existing_score:
+                    records[token_id] = record
+
+        return records
+
+    async def get_open_trades_async(self, clob_client=None) -> str:
+        """Returns formatted string of open trades with live PnL using SQLite as source of truth."""
+        from src.portfolio_manager import TradePosition
+
+        session = portfolio_manager.Session()
+        try:
+            open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
+        finally:
+            session.close()
+
+        if not open_trades:
+            return "📂 Открытых сделок нет."
+
+        jsonl_map = self._load_latest_records_by_token()
+        unique_tokens = list({trade.token_id for trade in open_trades if trade.token_id})
+        portfolio_manager.get_current_prices(clob_client, unique_tokens)
+
+        lines = ["📂 Открытые сделки:\n"]
+        total_unrealized_pnl = 0.0
+
+        for trade in open_trades:
+            record = jsonl_map.get(trade.token_id, {})
+            size = float(trade.size_usd or 0.0)
+            entry_price = float(trade.entry_price or 0.0)
+            shares = size / entry_price if entry_price > 0 else 0.0
+            current_price = portfolio_manager.get_current_price(clob_client, trade.token_id)
+
+            if current_price is not None:
+                current_value = shares * current_price
+                entry_value = shares * entry_price
+                pnl = current_value - entry_value
+                pnl_str = f"{pnl:+.2f}$"
+
+                predicted_prob = record.get("predicted_prob")
+                if predicted_prob is not None:
+                    new_edge = (predicted_prob - current_price) * 100
+                    ai_prob_pct = predicted_prob * 100
+                    market_str = f"(рынок: {current_price:.3f} | Edge: {new_edge:+.1f}% | AI: {ai_prob_pct:.1f}%)"
+                else:
+                    market_str = f"(рынок: {current_price:.3f})"
+                total_unrealized_pnl += pnl
+            else:
+                pnl_str = "+0.00$"
+                market_str = "(ошибка получения цены)"
+
+            question = record.get("question", "")
+            date_str = self._extract_market_date(question)
+            temp_str = self._format_market_bin(question)
+            outcome = record.get("bought_outcome") or trade.outcome_name or "?"
+
+            lines.append(
+                f"• {trade.city} | {date_str} [{temp_str}] | {outcome}\n"
+                f"  ↳ Entry: {shares:.2f} shares @ {entry_price:.3f}\n"
+                f"  ↳ PnL: {pnl_str} {market_str}\n"
+            )
+
+        lines.append(f"\n📈 Нереализованный PnL: {total_unrealized_pnl:+.2f}$")
+        return "\n".join(lines)
+
+    def get_closed_trades(self) -> str:
+        """Returns the latest closed executed trades using SQLite as source of truth."""
+        from src.portfolio_manager import TradePosition
+
+        session = portfolio_manager.Session()
+        try:
+            db_trades = session.query(TradePosition).filter(TradePosition.status != "OPEN").all()
+        finally:
+            session.close()
+
+        if not db_trades:
+            return "Closed trade history is empty."
+
+        closed_map = self._load_best_closed_records_by_token()
+        merged = []
+
+        for trade in db_trades:
+            record = closed_map.get(trade.token_id, {})
+            price_at_buy = float(trade.entry_price or record.get("price_at_buy", 0.0) or 0.0)
+            size_usd = float(trade.size_usd or record.get("size_usd", 0.0) or 0.0)
+            shares = size_usd / price_at_buy if price_at_buy > 0 else 0.0
+            pnl = float(record.get("realized_pnl", 0.0) or 0.0)
+            icon = "OK" if pnl > 0 else ("LOSS" if pnl < 0 else "FLAT")
+
+            question = record.get("question", "")
+            city = record.get("city") or trade.city or "?"
+            outcome = record.get("bought_outcome") or trade.outcome_name or "?"
+            date_str = self._extract_market_date(question)
+            temp_str = self._format_market_bin(question)
+            sort_key = (
+                trade.resolved_at.isoformat() if getattr(trade, "resolved_at", None)
+                else trade.created_at.isoformat() if getattr(trade, "created_at", None)
+                else record.get("timestamp", "")
+            )
+
+            merged.append({
+                "sort_key": sort_key,
+                "line": (
+                    f"{icon} {city} | {date_str} [{temp_str}] | {outcome} | PnL: {pnl:+.2f}$\n"
+                    f"  ↳ Entry: {size_usd:.2f}$ ({shares:.2f} sh) @ {price_at_buy:.3f}"
+                ),
+            })
+
+        merged.sort(key=lambda item: item["sort_key"])
+        lines = [item["line"] for item in merged[-15:]]
+        return "Latest Closed Trades (up to 15):\n\n" + "\n\n".join(lines)
+
+    def get_portfolio_stats(self, clob_client=None) -> str:
+        """Returns portfolio stats using executed trades from SQLite."""
+        from src.portfolio_manager import TradePosition
+
+        session = portfolio_manager.Session()
+        try:
+            db_trades = session.query(TradePosition).all()
+        finally:
+            session.close()
+
+        if not db_trades:
+            return "No data for portfolio stats."
+
+        latest_map = self._load_latest_records_by_token()
+        closed_map = self._load_best_closed_records_by_token()
+
+        total_trades = len(db_trades)
+        wins = 0
+        losses = 0
+        pnl = 0.0
+        ev_sum = 0.0
+
+        for trade in db_trades:
+            record = latest_map.get(trade.token_id, {})
+            ev_sum += float(record.get("ev", 0.0) or 0.0)
+
+            if trade.status == "OPEN":
+                continue
+
+            closed_record = closed_map.get(trade.token_id, record)
+            if closed_record.get("realized_pnl") is not None:
+                trade_pnl = float(closed_record["realized_pnl"])
+            else:
+                size = float(trade.size_usd or closed_record.get("size_usd", 0.0) or 0.0)
+                price = float(trade.entry_price or closed_record.get("price_at_buy", 0.0) or 0.0)
+                if price > 0:
+                    trade_pnl = ((size / price) - size) if closed_record.get("actual_outcome") is True else -size
+                else:
+                    trade_pnl = 0.0
+
+            pnl += trade_pnl
+            if trade_pnl > 0:
+                wins += 1
+            elif trade_pnl < 0:
+                losses += 1
+
+        resolved = wins + losses
+        win_rate = (wins / resolved * 100) if resolved > 0 else 0.0
+        avg_ev = (ev_sum / total_trades) if total_trades > 0 else 0.0
+        balance_str = "N/A (DRY_RUN)"
+
+        if clob_client is not None and not config.dry_run:
+            try:
+                bal = clob_client.get_balance_allowance(asset_type="COLLATERAL")
+                balance_str = f"${float(bal['balance']):.2f}" if isinstance(bal, dict) else str(bal)
+            except Exception:
+                pass
+
+        if resolved == 0:
+            return "Not enough closed trades for stats yet."
+
+        return (
+            f"Stats:\n\n"
+            f"Total Balance USDC: {balance_str}\n\n"
+            f"Closed PnL: {pnl:+.2f}$\n"
+            f"Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
+            f"Executed Trades: {total_trades}\n"
+            f"Average Entry EV: {avg_ev:+.3f}\n"
+        )
+
+    def get_balance_summary(self, clob_client=None) -> str:
+        """Returns account balance summary using SQLite trades and closed PnL records."""
+        from src.portfolio_manager import TradePosition
+
+        base_dry_run_balance = 1000.0
+        session = portfolio_manager.Session()
+        try:
+            closed_map = self._load_best_closed_records_by_token()
+            closed_trades = session.query(TradePosition).filter(TradePosition.status != "OPEN").all()
+            total_realized_pnl = 0.0
+
+            for trade in closed_trades:
+                record = closed_map.get(trade.token_id, {})
+                if record.get("realized_pnl") is not None:
+                    total_realized_pnl += float(record["realized_pnl"])
+                else:
+                    size = float(trade.size_usd or record.get("size_usd", 0.0) or 0.0)
+                    price = float(trade.entry_price or record.get("price_at_buy", 1.0) or 1.0)
+                    total_realized_pnl += ((size / price) - size) if record.get("actual_outcome") is True else -size
+
+            open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
+            total_exposure = sum(float(trade.size_usd or 0.0) for trade in open_trades)
+
+            if config.dry_run:
+                current_balance = base_dry_run_balance + total_realized_pnl
+                free_cash = current_balance - total_exposure
+                return (
+                    f"Virtual Balance (DRY RUN):\n\n"
+                    f"Total Equity: {current_balance:.2f} $\n"
+                    f"Frozen in Trades: {total_exposure:.2f} $\n"
+                    f"Free Cash: {free_cash:.2f} $\n\n"
+                    f"Closed PnL: {total_realized_pnl:+.2f} $"
+                )
+
+            balance_str = "Fetch error"
+            free_cash_str = "Fetch error"
+            if clob_client is not None:
+                try:
+                    bal = clob_client.get_balance_allowance(asset_type="COLLATERAL")
+                    if isinstance(bal, dict) and 'balance' in bal:
+                        free_cash_str = f"{float(bal['balance']):.2f} $"
+                        current_balance = float(bal['balance']) + total_exposure
+                        balance_str = f"{current_balance:.2f} $"
+                except Exception:
+                    pass
+
+            return (
+                f"Real Balance (LIVE):\n\n"
+                f"Estimated Equity: ~{balance_str}\n"
+                f"Open Exposure: {total_exposure:.2f} $\n"
+                f"Available USDC: {free_cash_str}\n\n"
+                f"Closed Bot PnL: {total_realized_pnl:+.2f} $"
+            )
+        except Exception as e:
+            logger.error(f"Error calculating balance summary: {e}")
+            return "Error calculating balance."
+        finally:
+            session.close()
+
+    async def get_open_trades_async(self, clob_client=None) -> str:
+        """Returns formatted string of open trades with live PnL using SQLite as source of truth."""
+        from src.portfolio_manager import TradePosition
+
+        session = portfolio_manager.Session()
+        try:
+            open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
+        finally:
+            session.close()
+
+        if not open_trades:
+            return "📂 Открытых сделок нет."
+
+        jsonl_map = self._load_latest_records_by_token()
+        unique_tokens = list({trade.token_id for trade in open_trades if trade.token_id})
+        portfolio_manager.get_current_prices(clob_client, unique_tokens)
+
+        lines = ["📂 Открытые сделки:\n"]
+        total_unrealized_pnl = 0.0
+
+        for trade in open_trades:
+            record = jsonl_map.get(trade.token_id, {})
+            size = float(trade.size_usd or 0.0)
+            entry_price = float(trade.entry_price or 0.0)
+            shares = size / entry_price if entry_price > 0 else 0.0
+            current_price = portfolio_manager.get_current_price(clob_client, trade.token_id)
+
+            if current_price is not None:
+                current_value = shares * current_price
+                entry_value = shares * entry_price
+                pnl = current_value - entry_value
+                pnl_str = f"{pnl:+.2f}$"
+
+                predicted_prob = record.get("predicted_prob")
+                if predicted_prob is not None:
+                    new_edge = (predicted_prob - current_price) * 100
+                    ai_prob_pct = predicted_prob * 100
+                    market_str = f"(рынок: {current_price:.3f} | Edge: {new_edge:+.1f}% | AI: {ai_prob_pct:.1f}%)"
+                else:
+                    market_str = f"(рынок: {current_price:.3f})"
+                total_unrealized_pnl += pnl
+            else:
+                pnl_str = "+0.00$"
+                market_str = "(ошибка получения цены)"
+
+            question = record.get("question", "")
+            date_str = self._extract_market_date(question)
+            temp_str = self._format_market_bin(question)
+            outcome = record.get("bought_outcome") or trade.outcome_name or "?"
+
+            lines.append(
+                f"• {trade.city} | {date_str} [{temp_str}] | {outcome}\n"
+                f"  ↳ Вход: {shares:.2f} shares @ {entry_price:.3f}\n"
+                f"  ↳ PnL: {pnl_str} {market_str}\n"
+            )
+
+        lines.append(f"\n📈 Нереализованный PnL: {total_unrealized_pnl:+.2f}$")
+        return "\n".join(lines)
+
+    def get_closed_trades(self) -> str:
+        """Returns the latest closed executed trades using SQLite as source of truth."""
+        from src.portfolio_manager import TradePosition
+
+        session = portfolio_manager.Session()
+        try:
+            db_trades = session.query(TradePosition).filter(TradePosition.status != "OPEN").all()
+        finally:
+            session.close()
+
+        if not db_trades:
+            return "📜 История закрытых сделок пуста."
+
+        closed_map = self._load_best_closed_records_by_token()
+        merged = []
+
+        for trade in db_trades:
+            record = closed_map.get(trade.token_id, {})
+            price_at_buy = float(trade.entry_price or record.get("price_at_buy", 0.0) or 0.0)
+            size_usd = float(trade.size_usd or record.get("size_usd", 0.0) or 0.0)
+            shares = size_usd / price_at_buy if price_at_buy > 0 else 0.0
+            pnl = float(record.get("realized_pnl", 0.0) or 0.0)
+            icon = "✅" if pnl > 0 else ("❌" if pnl < 0 else "⚪")
+
+            question = record.get("question", "")
+            city = record.get("city") or trade.city or "?"
+            outcome = record.get("bought_outcome") or trade.outcome_name or "?"
+            date_str = self._extract_market_date(question)
+            temp_str = self._format_market_bin(question)
+            sort_key = (
+                trade.resolved_at.isoformat() if getattr(trade, "resolved_at", None)
+                else trade.created_at.isoformat() if getattr(trade, "created_at", None)
+                else record.get("timestamp", "")
+            )
+
+            merged.append({
+                "sort_key": sort_key,
+                "line": (
+                    f"{icon} {city} | {date_str} [{temp_str}] | {outcome} | PnL: {pnl:+.2f}$\n"
+                    f"  ↳ Вход: {size_usd:.2f}$ ({shares:.2f} sh) @ {price_at_buy:.3f}"
+                ),
+            })
+
+        merged.sort(key=lambda item: item["sort_key"])
+        lines = [item["line"] for item in merged[-15:]]
+        return "📜 Последние закрытые сделки (до 15):\n\n" + "\n\n".join(lines)
+
+    def get_portfolio_stats(self, clob_client=None) -> str:
+        """Returns portfolio stats using executed trades from SQLite."""
+        from src.portfolio_manager import TradePosition
+
+        session = portfolio_manager.Session()
+        try:
+            db_trades = session.query(TradePosition).all()
+        finally:
+            session.close()
+
+        if not db_trades:
+            return "📊 Пока нет данных для статистики."
+
+        latest_map = self._load_latest_records_by_token()
+        closed_map = self._load_best_closed_records_by_token()
+
+        total_trades = len(db_trades)
+        wins = 0
+        losses = 0
+        pnl = 0.0
+        ev_sum = 0.0
+
+        for trade in db_trades:
+            record = latest_map.get(trade.token_id, {})
+            ev_sum += float(record.get("ev", 0.0) or 0.0)
+
+            if trade.status == "OPEN":
+                continue
+
+            closed_record = closed_map.get(trade.token_id, record)
+            if closed_record.get("realized_pnl") is not None:
+                trade_pnl = float(closed_record["realized_pnl"])
+            else:
+                size = float(trade.size_usd or closed_record.get("size_usd", 0.0) or 0.0)
+                price = float(trade.entry_price or closed_record.get("price_at_buy", 0.0) or 0.0)
+                if price > 0:
+                    trade_pnl = ((size / price) - size) if closed_record.get("actual_outcome") is True else -size
+                else:
+                    trade_pnl = 0.0
+
+            pnl += trade_pnl
+            if trade_pnl > 0:
+                wins += 1
+            elif trade_pnl < 0:
+                losses += 1
+
+        resolved = wins + losses
+        win_rate = (wins / resolved * 100) if resolved > 0 else 0.0
+        avg_ev = (ev_sum / total_trades) if total_trades > 0 else 0.0
+        balance_str = "N/A (DRY_RUN)"
+
+        if clob_client is not None and not config.dry_run:
+            try:
+                bal = clob_client.get_balance_allowance(asset_type="COLLATERAL")
+                balance_str = f"${float(bal['balance']):.2f}" if isinstance(bal, dict) else str(bal)
+            except Exception:
+                pass
+
+        if resolved == 0:
+            return "📊 Пока недостаточно закрытых сделок для статистики."
+
+        return (
+            f"📊 Радар статистики:\n\n"
+            f"💰 Общий баланс USDC: {balance_str}\n\n"
+            f"📈 PnL Closed: {pnl:+.2f}$\n"
+            f"🎯 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)\n"
+            f"🎲 Всего сделок: {total_trades}\n"
+            f"🧠 Средний EV входа: {avg_ev:+.3f}\n"
+        )
+
+    def get_balance_summary(self, clob_client=None) -> str:
+        """Returns account balance summary using SQLite trades and closed PnL records."""
+        from src.portfolio_manager import TradePosition
+
+        base_dry_run_balance = 1000.0
+        session = portfolio_manager.Session()
+        try:
+            closed_map = self._load_best_closed_records_by_token()
+            closed_trades = session.query(TradePosition).filter(TradePosition.status != "OPEN").all()
+            total_realized_pnl = 0.0
+
+            for trade in closed_trades:
+                record = closed_map.get(trade.token_id, {})
+                if record.get("realized_pnl") is not None:
+                    total_realized_pnl += float(record["realized_pnl"])
+                else:
+                    size = float(trade.size_usd or record.get("size_usd", 0.0) or 0.0)
+                    price = float(trade.entry_price or record.get("price_at_buy", 1.0) or 1.0)
+                    total_realized_pnl += ((size / price) - size) if record.get("actual_outcome") is True else -size
+
+            open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
+            total_exposure = sum(float(trade.size_usd or 0.0) for trade in open_trades)
+
+            if config.dry_run:
+                current_balance = base_dry_run_balance + total_realized_pnl
+                free_cash = current_balance - total_exposure
+                return (
+                    f"💰 Виртуальный баланс (DRY RUN):\n\n"
+                    f"💳 Всего на счету: {current_balance:.2f} $\n"
+                    f"🧊 Заморожено в сделках: {total_exposure:.2f} $\n"
+                    f"💵 Свободный кэш: {free_cash:.2f} $\n\n"
+                    f"📈 Общий PnL (закр.): {total_realized_pnl:+.2f} $"
+                )
+
+            balance_str = "Fetch error"
+            free_cash_str = "Fetch error"
+            if clob_client is not None:
+                try:
+                    bal = clob_client.get_balance_allowance(asset_type="COLLATERAL")
+                    if isinstance(bal, dict) and 'balance' in bal:
+                        free_cash_str = f"{float(bal['balance']):.2f} $"
+                        current_balance = float(bal['balance']) + total_exposure
+                        balance_str = f"{current_balance:.2f} $"
+                except Exception:
+                    pass
+
+            return (
+                f"💰 Реальный баланс (LIVE):\n\n"
+                f"💳 Оценка equity: ~{balance_str}\n"
+                f"🧊 Открытая экспозиция: {total_exposure:.2f} $\n"
+                f"💵 Доступный USDC: {free_cash_str}\n\n"
+                f"📈 Closed Bot PnL: {total_realized_pnl:+.2f} $"
+            )
+        except Exception as e:
+            logger.error(f"Error calculating balance summary: {e}")
+            return "Error calculating balance."
         finally:
             session.close()
 

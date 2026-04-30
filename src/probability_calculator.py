@@ -17,6 +17,9 @@ from scipy.stats import norm
 
 from src.utils import logger
 
+DEGREE_RE = r'(?:°|В°)?'
+UNIT_RE = rf'(?:{DEGREE_RE}[FCfc])?'
+
 
 # ---------------------------------------------------------------------------
 # Unit conversion
@@ -49,6 +52,14 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
         (bin_low, bin_high, unit) where unit is 'F' or 'C',
         or None if all patterns fail.
     """
+    question = (
+        question.replace("°", "В°")
+        .replace("?F", "В°F")
+        .replace("?f", "В°f")
+        .replace("?C", "В°C")
+        .replace("?c", "В°c")
+        .replace("–", "-")
+    )
     q_lower = question.lower()
 
     # --- 1. Detect temperature unit ---
@@ -66,6 +77,37 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
         else:
             unit = 'F'
 
+    clean_question = re.sub(r'(?<=\d)\s*[^\d\s]*[FCfc]\b', '', question)
+
+    m = re.search(r'between\s+([\d.]+)\s+and\s+([\d.]+)', clean_question, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1)) - 0.5, float(m.group(2)) + 0.5, unit
+        except ValueError:
+            pass
+
+    m = re.search(r'be\s+([\d.]+)\s+or\s+(?:higher|above|more)', clean_question, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1)) - 0.5, 999.0, unit
+        except ValueError:
+            pass
+
+    m = re.search(r'be\s+([\d.]+)\s+or\s+(?:lower|below|less)', clean_question, re.IGNORECASE)
+    if m:
+        try:
+            return -999.0, float(m.group(1)) + 0.5, unit
+        except ValueError:
+            pass
+
+    m = re.search(r'be\s+([\d.]+)\b', clean_question, re.IGNORECASE)
+    if m:
+        try:
+            t = float(m.group(1))
+            return t - 0.5, t + 0.5, unit
+        except ValueError:
+            pass
+
     # --- 2. Range: "between X and Y" ---
     m = re.search(
         r'between\s+([\d.]+)\s*(?:°[FCfc])?\s+and\s+([\d.]+)',
@@ -73,14 +115,14 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     )
     if m:
         try:
-            return float(m.group(1)), float(m.group(2)), unit
+            return float(m.group(1)) - 0.5, float(m.group(2)) + 0.5, unit
         except ValueError:
             pass
 
     m = re.search(r'between\s+([\d.]+)\s*[-–]\s*([\d.]+)', question, re.IGNORECASE)
     if m:
         try:
-            return float(m.group(1)), float(m.group(2)), unit
+            return float(m.group(1)) - 0.5, float(m.group(2)) + 0.5, unit
         except ValueError:
             pass
 
@@ -90,7 +132,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     )
     if m:
         try:
-            return float(m.group(1)), float(m.group(2)), unit
+            return float(m.group(1)) - 0.5, float(m.group(2)) + 0.5, unit
         except ValueError:
             pass
 
@@ -101,7 +143,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     )
     if m:
         try:
-            return float(m.group(1)), 999.0, unit
+            return float(m.group(1)) - 0.5, 999.0, unit
         except ValueError:
             pass
 
@@ -112,7 +154,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     )
     if m:
         try:
-            return -999.0, float(m.group(1)) + 1.0, unit
+            return -999.0, float(m.group(1)) + 0.5, unit
         except ValueError:
             pass
 
@@ -121,7 +163,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     if m:
         try:
             t = float(m.group(1))
-            return t, t + 1.0, unit
+            return t - 0.5, t + 0.5, unit
         except ValueError:
             pass
 
@@ -132,7 +174,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     )
     if m:
         try:
-            return float(m.group(1)), 999.0, unit
+            return float(m.group(1)) - 0.5, 999.0, unit
         except ValueError:
             pass
 
@@ -143,7 +185,7 @@ def parse_temperature_bin(question: str) -> Optional[tuple[float, float, str]]:
     )
     if m:
         try:
-            return -999.0, float(m.group(1)), unit
+            return -999.0, float(m.group(1)) + 0.5, unit
         except ValueError:
             pass
 
@@ -242,6 +284,8 @@ def calculate_bin_probability(
 ) -> float:
     """
     Probability that daily high temperature falls in [bin_low, bin_high].
+    For exact integer weather buckets, Yes means the high lands inside the
+    bucket and No is the complement outside that bucket.
 
     Blending weights by forecast horizon (hours_to_close):
 

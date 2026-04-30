@@ -10,6 +10,7 @@ from py_clob_client.clob_types import OrderArgs
 import os
 import re
 import asyncio
+from src.probability_calculator import parse_temperature_bin
 
 Base = declarative_base()
 
@@ -49,6 +50,29 @@ class PortfolioManager:
         # Cache for live prices (token_id -> {'price': float, 'time': timestamp})
         self._price_cache = {}
         self.cache_ttl = 30 # seconds
+
+    def _format_temp_value(self, value: float) -> str:
+        if abs(value - round(value)) < 0.05:
+            return str(int(round(value)))
+        return f"{value:.1f}"
+
+    def _extract_market_date(self, question: str) -> str:
+        match = re.search(r'\bon\s+([A-Za-z]+\s+\d+)', question or "")
+        return match.group(1) if match else "N/A"
+
+    def _format_market_bin(self, question: str) -> str:
+        parsed = parse_temperature_bin(question or "")
+        if parsed is None:
+            return "N/A"
+
+        low, high, unit = parsed
+        if low <= -999:
+            return f"<= {self._format_temp_value(high - 0.5)}{unit}"
+        if high >= 999:
+            return f">= {self._format_temp_value(low + 0.5)}{unit}"
+        if abs((high - low) - 1.0) < 0.05:
+            return f"{self._format_temp_value(low + 0.5)}{unit}"
+        return f"{self._format_temp_value(low + 0.5)}-{self._format_temp_value(high - 0.5)}{unit}"
 
     def get_current_prices(self, clob_client, token_ids: list[str]) -> dict[str, float]:
         """Пакетное получение цен (POST /prices). С защитой от ошибок SDK."""
@@ -192,6 +216,30 @@ class PortfolioManager:
         finally:
             session.close()
 
+    def was_market_closed_recently(self, market_id: str, cooldown_minutes: int) -> bool:
+        if not market_id or cooldown_minutes <= 0:
+            return False
+
+        session = self.Session()
+        try:
+            recent_trade = (
+                session.query(TradePosition)
+                .filter(
+                    TradePosition.market_id == market_id,
+                    TradePosition.status.in_(["SOLD", "RESOLVED"]),
+                    TradePosition.resolved_at.isnot(None),
+                )
+                .order_by(TradePosition.resolved_at.desc())
+                .first()
+            )
+            if not recent_trade or recent_trade.resolved_at is None:
+                return False
+
+            elapsed_seconds = (datetime.utcnow() - recent_trade.resolved_at).total_seconds()
+            return elapsed_seconds < cooldown_minutes * 60
+        finally:
+            session.close()
+
     def can_trade_city(self, city: str, intended_size: float = None) -> bool:
         if intended_size is None:
             intended_size = config.default_trade_size
@@ -203,6 +251,11 @@ class PortfolioManager:
         max_total = self.assumed_bankroll * config.max_total_exposure
         # Max city %
         max_city = self.assumed_bankroll * config.max_city_exposure
+        max_single = self.assumed_bankroll * config.max_single_trade_exposure
+
+        if intended_size > max_single:
+            logger.warning(f"Trade rejected: Exceeds single-trade cap ({intended_size} > {max_single})")
+            return False
         
         if total_exposure + intended_size > max_total:
             logger.warning(f"Trade rejected: Exceeds max total exposure limit ({total_exposure} + {intended_size} > {max_total})")
@@ -364,7 +417,7 @@ class PortfolioManager:
                     # Supplement with OpenMeteo
                     for icao in icao_codes:
                         try:
-                            om_data = await weather_fetcher.fetch_open_meteo(icao)
+                            om_data = await weather_fetcher.fetch_open_meteo(icao, force_refresh=True)
                             if icao in weather_data_map:
                                 weather_data_map[icao].update(om_data)
                         except: pass
@@ -413,8 +466,7 @@ class PortfolioManager:
                             new_prob = matching_sig.get('predicted_prob')
                             if new_prob is not None:
                                 q_text = matching_sig.get("question", "")
-                                date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
-                                date_str = date_match.group(1) if date_match else "N/A"
+                                date_str = self._extract_market_date(q_text)
                                 
                                 if old_prob is not None:
                                     shift = (new_prob - old_prob) * 100
@@ -511,6 +563,13 @@ class PortfolioManager:
                     sl_edge_limit = self.get_risk_setting("sl_edge", -12.0)
                     sl_pnl_limit = self.get_risk_setting("sl_pnl", -70.0)
                     time_exit_limit = self.get_risk_setting("time_exit_h", 6.0)
+                    analysis_model = str(mem.get("analysis_model") or getattr(config, "analysis_model", "legacy")).lower()
+                    is_tsas_trade = analysis_model == "tsas"
+                    hold_tail_trade = (
+                        is_tsas_trade
+                        and trade.entry_price <= float(getattr(config, "tsas_hold_tail_max_entry_price", 0.05))
+                        and predicted_prob >= float(getattr(config, "tsas_hold_tail_min_prob", 0.12))
+                    )
 
                     exit_reason = None
                     sl_edge_threshold = -abs(sl_edge_limit)
@@ -525,18 +584,16 @@ class PortfolioManager:
                         exit_reason = "TARGET_REACHED"
                     elif unrealized_pnl_percent >= strong_tp_limit:
                         exit_reason = "TAKE_PROFIT_STRONG"
-                    elif new_edge <= tp_edge_limit and unrealized_pnl_percent > 0:
+                    elif new_edge <= tp_edge_limit and unrealized_pnl_percent > 0 and not hold_tail_trade:
                         exit_reason = "TAKE_PROFIT_EDGE"
-                    elif hours_to_resolve < time_exit_limit:
+                    elif hours_to_resolve < time_exit_limit and not hold_tail_trade:
                         exit_reason = "TIME_EXIT"
 
                     if exit_reason:
                         # Format info strings
                         q_text = mem.get("question", "")
-                        date_match = re.search(r'on\s+([A-Za-z]+\s+\d+)', q_text)
-                        temp_match = re.search(r'be\s+(.*?)(?:\s+or\s+|\?$|$)', q_text)
-                        date_str = date_match.group(1) if date_match else "N/A"
-                        temp_str = temp_match.group(1).strip() if temp_match else "N/A"
+                        date_str = self._extract_market_date(q_text)
+                        temp_str = self._format_market_bin(q_text)
                         header_str = f"{trade.city} ({date_str}) [{temp_str}] {trade.outcome_name}"
 
                         logger.info(f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% → new_edge {new_edge:+.1f}% → {exit_reason} SELL {shares:.2f} shares @ WAP {exit_price:.3f} (Entry: {trade.entry_price:.3f}) | PnL {unrealized_pnl:+.2f}$ ({unrealized_pnl_percent:+.1f}%)")
@@ -588,6 +645,408 @@ class PortfolioManager:
                             session.commit()
                             trades_sold += 1
                 
+                if trades_sold == 0:
+                    logger.info(f"[MONITOR 10min] Finished check of {len(open_trades)} trades. No positions reached exit thresholds.")
+                else:
+                    logger.info(f"[MONITOR 10min] Finished check. Sold {trades_sold} positions.")
+
+        except Exception as e:
+            logger.error(f"[MONITOR 10min] Fatal error: {e}")
+            traceback.print_exc()
+        finally:
+            session.close()
+
+    async def monitor_open_trades(self, clob_client) -> None:
+        """Re-check open positions, refresh probabilities, and decide whether to exit."""
+        if not clob_client:
+            logger.warning("[MONITOR 10min] clob_client is None. Skipping.")
+            return
+
+        from src.weather_data import weather_fetcher
+        from src.ai_analyzer import ai_analyzer
+        from src.calibration import calibration_engine
+        from src.market_discovery import MarketDiscoverer
+
+        session = self.Session()
+        try:
+            open_trades = session.query(TradePosition).filter_by(status="OPEN").all()
+            if not open_trades:
+                logger.info("[MONITOR 10min] No open trades to monitor.")
+                return
+
+            logger.info(f"[MONITOR 10min] Started full re-analysis for {len(open_trades)} open trades...")
+
+            ai_memory = {}
+            mem_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "historical_predictions.jsonl")
+            if os.path.exists(mem_path):
+                with open(mem_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line)
+                            key = f"{record.get('market_id')}_{record.get('token_id')}"
+                            ai_memory[key] = record
+                        except Exception:
+                            pass
+
+            city_groups = {}
+            for trade in open_trades:
+                city_groups.setdefault(trade.city, []).append(trade)
+
+            icao_codes = list({
+                config.city_icao_mapping.get(city)
+                for city in city_groups.keys()
+                if config.city_icao_mapping.get(city)
+            })
+            weather_data_map = {}
+            if icao_codes:
+                logger.info(f"[MONITOR] Fetching weather for {len(icao_codes)} stations (with retries)...")
+                weather_data_map = await weather_fetcher.fetch_weather_for_icao(icao_codes)
+
+                if weather_data_map is None:
+                    logger.warning("[MONITOR] [SAFETY ABORT] Missing METAR/TAF after retries. Skipping model re-analysis for this cycle.")
+                    weather_data_map = {}
+                else:
+                    for icao in icao_codes:
+                        try:
+                            om_data = await weather_fetcher.fetch_open_meteo(icao, force_refresh=True)
+                            if icao in weather_data_map:
+                                weather_data_map[icao].update(om_data)
+                        except Exception:
+                            pass
+
+            semaphore = asyncio.Semaphore(len(ai_analyzer.clients) if hasattr(ai_analyzer, 'clients') and ai_analyzer.clients else 1)
+
+            discoverer = MarketDiscoverer()
+            try:
+                all_markets = await discoverer.get_active_weather_markets()
+            except Exception as e:
+                logger.warning(f"[MONITOR] Failed to fetch full city markets: {e}. Using empty context.")
+                all_markets = []
+
+            async def process_monitor_city(city: str, trades: list, all_city_markets: list):
+                async with semaphore:
+                    icao = config.city_icao_mapping.get(city)
+                    weather = weather_data_map.get(icao)
+                    if not weather:
+                        logger.warning(f"[MONITOR] No weather for {city}, skipping re-analysis.")
+                        return
+
+                    city_markets = [
+                        market for market in all_city_markets
+                        if market.get("city") == city and market.get("outcomes")
+                    ]
+
+                    if not city_markets:
+                        logger.warning(f"[MONITOR] No active markets found for {city}, skipping re-analysis.")
+                        return
+
+                    logger.info(f"[MONITOR] [{city}] Re-analyzing {len(city_markets)} markets with fresh weather...")
+                    fresh_signals = await ai_analyzer.analyze_city_batch(city, city_markets, weather, return_all=True)
+                    fresh_by_token = {
+                        str(signal.get("token_id")): signal
+                        for signal in fresh_signals
+                        if signal.get("token_id")
+                    }
+
+                    for trade in trades:
+                        mem_key = f"{trade.market_id}_{trade.token_id}"
+                        old_mem = ai_memory.get(mem_key, {})
+                        old_prob = old_mem.get("predicted_prob")
+                        trade_token = str(trade.token_id)
+                        matching_sig = fresh_by_token.get(trade_token)
+
+                        if not matching_sig:
+                            fallback_market = next(
+                                (
+                                    market for market in city_markets
+                                    if str(market.get("market_id")) == str(trade.market_id)
+                                    or any(str(outcome.get("token_id")) == trade_token for outcome in market.get("outcomes", []))
+                                ),
+                                None,
+                            )
+                            if fallback_market:
+                                fallback_signals = await ai_analyzer.analyze_city_batch(
+                                    city,
+                                    [fallback_market],
+                                    weather,
+                                    return_all=True,
+                                )
+                                matching_sig = next(
+                                    (
+                                        signal for signal in fallback_signals
+                                        if str(signal.get("token_id")) == trade_token
+                                    ),
+                                    None,
+                                )
+
+                        if not matching_sig:
+                            logger.debug(
+                                f"[MONITOR] No fresh signal found for {trade.city} "
+                                f"market {str(trade.market_id)[:8]} token {trade_token[:8]}..."
+                            )
+                            continue
+
+                        new_prob = matching_sig.get("predicted_prob")
+                        if new_prob is not None:
+                            question = matching_sig.get("question", "")
+                            date_str = self._extract_market_date(question)
+                            temp_str = self._format_market_bin(question)
+
+                            if old_prob is not None:
+                                shift = (new_prob - old_prob) * 100
+                                logger.info(
+                                    f"[MONITOR] UPDATE {city} ({date_str}) [{temp_str}] \"{trade.outcome_name}\" | "
+                                    f"Probability: {old_prob*100:.1f}% -> {new_prob*100:.1f}% | Change: {shift:+.1f}%"
+                                )
+                                family_distribution = matching_sig.get("family_distribution")
+                                if family_distribution and abs(shift) >= 0.05:
+                                    family_id = matching_sig.get("family_id") or f"{city} ({date_str})"
+                                    family_raw_sum = matching_sig.get("family_raw_sum")
+                                    family_norm_sum = matching_sig.get("family_norm_sum")
+                                    market_divergence = float(matching_sig.get("family_market_divergence") or 0.0)
+                                    coverage_suffix = (
+                                        f" | coverage={family_raw_sum*100:.1f}%"
+                                        if isinstance(family_raw_sum, (int, float))
+                                        else ""
+                                    )
+                                    norm_suffix = (
+                                        f" | norm_sum={family_norm_sum*100:.1f}%"
+                                        if isinstance(family_norm_sum, (int, float))
+                                        else ""
+                                    )
+                                    divergence_suffix = f" | market_div={market_divergence*100:.1f}%" if market_divergence > 0 else ""
+                                    logger.info(
+                                        f"[MONITOR] MODEL DISTRIBUTION {family_id}{coverage_suffix}{norm_suffix}{divergence_suffix} | {family_distribution}"
+                                    )
+                                    market_distribution = matching_sig.get("family_market_distribution")
+                                    if market_distribution:
+                                        logger.info(f"[MONITOR] MARKET DISTRIBUTION {family_id} | {market_distribution}")
+                                if abs(shift) >= 15:
+                                    reasoning = matching_sig.get("reasoning", "")
+                                    if reasoning:
+                                        logger.warning(
+                                            f"[MONITOR] REASONING SHIFT for {city} ({date_str}) [{temp_str}] "
+                                            f"\"{trade.outcome_name}\":\n           {reasoning}"
+                                        )
+                                    else:
+                                        logger.warning(
+                                            f"[MONITOR] Shift details unavailable for {city} ({date_str}) [{temp_str}] "
+                                            f"\"{trade.outcome_name}\"."
+                                        )
+                            else:
+                                logger.info(
+                                    f"[MONITOR] UPDATE {city} ({date_str}) [{temp_str}] \"{trade.outcome_name}\" | "
+                                    f"Probability: [first calculation] -> {new_prob*100:.1f}%"
+                                )
+                                family_distribution = matching_sig.get("family_distribution")
+                                if family_distribution:
+                                    family_id = matching_sig.get("family_id") or f"{city} ({date_str})"
+                                    family_raw_sum = matching_sig.get("family_raw_sum")
+                                    family_norm_sum = matching_sig.get("family_norm_sum")
+                                    market_divergence = float(matching_sig.get("family_market_divergence") or 0.0)
+                                    coverage_suffix = (
+                                        f" | coverage={family_raw_sum*100:.1f}%"
+                                        if isinstance(family_raw_sum, (int, float))
+                                        else ""
+                                    )
+                                    norm_suffix = (
+                                        f" | norm_sum={family_norm_sum*100:.1f}%"
+                                        if isinstance(family_norm_sum, (int, float))
+                                        else ""
+                                    )
+                                    divergence_suffix = f" | market_div={market_divergence*100:.1f}%" if market_divergence > 0 else ""
+                                    logger.info(
+                                        f"[MONITOR] MODEL DISTRIBUTION {family_id}{coverage_suffix}{norm_suffix}{divergence_suffix} | {family_distribution}"
+                                    )
+                                    market_distribution = matching_sig.get("family_market_distribution")
+                                    if market_distribution:
+                                        logger.info(f"[MONITOR] MARKET DISTRIBUTION {family_id} | {market_distribution}")
+
+                        calibration_engine.update_prediction_prob(trade.token_id, new_prob)
+                        ai_memory[mem_key] = matching_sig
+
+            tasks = [process_monitor_city(city, trades, all_markets) for city, trades in city_groups.items()]
+            if tasks:
+                await asyncio.gather(*tasks)
+
+            trades_sold = 0
+            async with httpx.AsyncClient() as http_client:
+                for trade in open_trades:
+                    mem_key = f"{trade.market_id}_{trade.token_id}"
+                    mem = ai_memory.get(mem_key, {})
+                    predicted_prob = mem.get("predicted_prob")
+
+                    if predicted_prob is None:
+                        logger.debug(f"[MONITOR 10min] Skipping {trade.city} - still no predicted_prob.")
+                        continue
+
+                    shares = trade.size_usd / trade.entry_price if trade.entry_price > 0 else 0
+
+                    exit_price, filled_shares, total_received = self._get_effective_exit_price(clob_client, trade.token_id, shares)
+                    if exit_price == 0:
+                        logger.debug(f"[MONITOR 10min] No liquidity to exit {trade.city}")
+                        continue
+
+                    await asyncio.sleep(0.05)
+
+                    unrealized_pnl = total_received - trade.size_usd
+                    unrealized_pnl_percent = (unrealized_pnl / trade.size_usd) * 100 if trade.size_usd > 0 else 0
+                    new_edge = (predicted_prob - exit_price) * 100
+
+                    hours_to_resolve = 999
+                    try:
+                        gamma_url = f"https://gamma-api.polymarket.com/markets?condition_id={trade.market_id}"
+                        response = await http_client.get(gamma_url, timeout=10.0)
+                        if response.status_code == 200:
+                            market_data = response.json()
+                            if market_data:
+                                end_date_str = market_data[0].get("endDate")
+                                if end_date_str:
+                                    dt_obj = datetime.strptime(end_date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                                    diff = dt_obj - datetime.now(timezone.utc)
+                                    hours_to_resolve = diff.total_seconds() / 3600
+                    except Exception:
+                        pass
+
+                    tp_edge_limit = self.get_risk_setting("tp_edge", 0.0)
+                    strong_tp_limit = self.get_risk_setting("strong_tp_pnl", 60.0)
+                    sl_edge_limit = self.get_risk_setting("sl_edge", -12.0)
+                    sl_pnl_limit = self.get_risk_setting("sl_pnl", -70.0)
+                    time_exit_limit = self.get_risk_setting("time_exit_h", 6.0)
+                    analysis_model = str(mem.get("analysis_model") or getattr(config, "analysis_model", "legacy")).lower()
+                    is_tsas_trade = analysis_model == "tsas"
+                    entry_predicted_prob = float(mem.get("entry_predicted_prob", predicted_prob))
+                    starting_edge = (entry_predicted_prob - trade.entry_price) * 100
+                    prob_drop_points = (entry_predicted_prob - predicted_prob) * 100
+                    prob_shift_points = abs(predicted_prob - entry_predicted_prob) * 100
+                    model_flip_floor = float(getattr(config, "tsas_exit_model_flip_floor", 0.30))
+                    crossed_model_flip_floor = (
+                        entry_predicted_prob > model_flip_floor
+                        and predicted_prob <= model_flip_floor
+                    )
+                    current_tsas_confidence = float(mem.get("tsas_confidence", 1.0))
+                    hold_tail_trade = (
+                        is_tsas_trade
+                        and trade.entry_price <= float(getattr(config, "tsas_hold_tail_max_entry_price", 0.05))
+                        and predicted_prob >= float(getattr(config, "tsas_hold_tail_min_prob", 0.12))
+                    )
+
+                    exit_reason = None
+                    sl_edge_threshold = -abs(sl_edge_limit)
+                    sl_pnl_threshold = -abs(sl_pnl_limit)
+
+                    if unrealized_pnl_percent <= sl_pnl_threshold:
+                        exit_reason = "STOP_LOSS_PRICE"
+                    elif new_edge <= sl_edge_threshold:
+                        exit_reason = "STOP_LOSS_EDGE"
+                    elif exit_price >= 0.98:
+                        exit_reason = "TARGET_REACHED"
+                    elif (
+                        is_tsas_trade
+                        and crossed_model_flip_floor
+                    ):
+                        exit_reason = "TSAS_MODEL_FLIP"
+                    elif (
+                        is_tsas_trade
+                        and prob_drop_points >= float(getattr(config, "tsas_exit_probability_collapse_points", 35.0))
+                        and predicted_prob <= float(getattr(config, "tsas_exit_probability_floor", 0.35))
+                    ):
+                        exit_reason = "TSAS_PROBABILITY_COLLAPSE"
+                    elif unrealized_pnl_percent >= strong_tp_limit:
+                        exit_reason = "TAKE_PROFIT_STRONG"
+                    elif (
+                        is_tsas_trade
+                        and not hold_tail_trade
+                        and current_tsas_confidence <= float(getattr(config, "tsas_exit_confidence_floor", 0.25))
+                        and new_edge <= float(getattr(config, "tsas_exit_confidence_edge_floor", 4.0))
+                    ):
+                        exit_reason = "TSAS_CONFIDENCE_DECAY"
+                    elif (
+                        is_tsas_trade
+                        and not hold_tail_trade
+                        and prob_drop_points >= float(getattr(config, "tsas_exit_prob_drop_points", 10.0))
+                        and new_edge <= float(getattr(config, "tsas_exit_edge_floor", 2.0))
+                    ):
+                        exit_reason = "TSAS_THESIS_DECAY"
+                    elif new_edge <= tp_edge_limit and unrealized_pnl_percent > 0 and not hold_tail_trade:
+                        exit_reason = "TAKE_PROFIT_EDGE"
+                    elif hours_to_resolve < time_exit_limit and not hold_tail_trade:
+                        exit_reason = "TIME_EXIT"
+
+                    if not exit_reason:
+                        continue
+
+                    question = mem.get("question", "")
+                    date_str = self._extract_market_date(question)
+                    temp_str = self._format_market_bin(question)
+                    header_str = f"{trade.city} ({date_str}) [{temp_str}] {trade.outcome_name}"
+
+                    logger.info(
+                        f"[MONITOR 10min] {header_str} | old_edge +{starting_edge:.1f}% -> "
+                        f"new_edge {new_edge:+.1f}% -> {exit_reason} SELL {shares:.2f} shares @ WAP {exit_price:.3f} "
+                        f"(Entry: {trade.entry_price:.3f}) | PnL {unrealized_pnl:+.2f}$ ({unrealized_pnl_percent:+.1f}%)"
+                    )
+
+                    if not config.dry_run:
+                        try:
+                            order_args = OrderArgs(
+                                price=exit_price,
+                                size=shares,
+                                side="SELL",
+                                token_id=trade.token_id
+                            )
+                            resp = clob_client.create_and_post_order(order_args)
+                            if resp and resp.get("success"):
+                                msg = (
+                                    f"<b>[MONITOR EXIT]</b>\n"
+                                    f"<b>Market:</b> {header_str}\n"
+                                    f"<b>Reason:</b> {exit_reason}\n"
+                                    f"<b>Shares:</b> {shares:.2f}\n"
+                                    f"<b>Entry Price:</b> {trade.entry_price}\n"
+                                    f"<b>Exit Price:</b> {exit_price}\n"
+                                    f"<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                                )
+                                await send_telegram_message(msg)
+
+                                trade.status = "SOLD"
+                                trade.resolved_at = datetime.utcnow()
+                                calibration_engine.mark_trade_closed(
+                                    trade.token_id,
+                                    actual_outcome=None,
+                                    exit_price=exit_price,
+                                    realized_pnl=unrealized_pnl
+                                )
+                                session.commit()
+                                trades_sold += 1
+                            else:
+                                logger.error(f"[MONITOR 10min] Sell order failed: {resp}")
+                        except Exception as e:
+                            logger.error(f"[MONITOR 10min] Execution exception: {e}")
+                            traceback.print_exc()
+                    else:
+                        msg = (
+                            f"<b>[DRY RUN EXIT]</b>\n"
+                            f"<b>Market:</b> {header_str}\n"
+                            f"<b>Reason:</b> {exit_reason}\n"
+                            f"<b>Shares:</b> {shares:.2f}\n"
+                            f"<b>Entry Price:</b> {trade.entry_price}\n"
+                            f"<b>Exit Price:</b> {exit_price}\n"
+                            f"<b>PnL:</b> {unrealized_pnl:+.2f}$"
+                        )
+                        await send_telegram_message(msg)
+                        trade.status = "SOLD"
+                        trade.resolved_at = datetime.utcnow()
+                        calibration_engine.mark_trade_closed(
+                            trade.token_id,
+                            actual_outcome=None,
+                            exit_price=exit_price,
+                            realized_pnl=unrealized_pnl
+                        )
+                        session.commit()
+                        trades_sold += 1
+
                 if trades_sold == 0:
                     logger.info(f"[MONITOR 10min] Finished check of {len(open_trades)} trades. No positions reached exit thresholds.")
                 else:

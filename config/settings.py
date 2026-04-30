@@ -37,11 +37,53 @@ class Settings(BaseSettings):
     resolution_check_interval_minutes: int = 15
     
     # Risk & Exposure
-    max_total_exposure: float = 0.5 # Required by PortfolioManager (50% of bankroll)
+    max_total_exposure: float = 0.2 # Required by PortfolioManager (20% of bankroll)
     max_city_exposure: float = 0.1 # Required by PortfolioManager (10% of bankroll)
+    max_single_trade_exposure: float = 0.05 # Hard cap per transaction (5% of bankroll)
     
     # Calibration
     calibration_min_trades: int = 3
+    
+    # Analysis engine
+    # "tsas" enables the new Thermo-Stochastic analysis core.
+    # "legacy" keeps the previous deterministic blended model available as a rollback.
+    analysis_model: str = "tsas"
+    tsas_min_confidence: float = 0.35
+    tsas_max_taf_inflation: float = 3.5
+    tsas_metar_alpha: float = 0.08
+    tsas_circuit_breaker_hours: float = 3.0
+    tsas_entry_min_hours_to_close: float = 12.0
+    tsas_entry_max_hours_to_close: float = 72.0
+    tsas_min_daily_volume_usd: float = 200.0
+    tsas_target_daily_volume_usd: float = 2500.0
+    tsas_max_spread: float = 0.20
+    tsas_ladder_enabled: bool = True
+    tsas_ladder_max_price: float = 0.35
+    tsas_ladder_max_positions: int = 3
+    tsas_max_city_positions: int = 3
+    tsas_ladder_package_cap: float = 0.06
+    tsas_ladder_min_package_ev: float = 0.10
+    tsas_ladder_min_price: float = 0.02
+    tsas_min_executable_price: float = 0.02
+    tsas_max_executable_price: float = 0.98
+    tsas_min_ev_for_min_trade: float = 0.18
+    tsas_reentry_cooldown_minutes: int = 180
+    tsas_hold_tail_max_entry_price: float = 0.10
+    tsas_hold_tail_min_prob: float = 0.12
+    tsas_exit_prob_drop_points: float = 10.0
+    tsas_exit_edge_floor: float = 2.0
+    tsas_exit_confidence_floor: float = 0.25
+    tsas_exit_confidence_edge_floor: float = 4.0
+    tsas_exit_probability_collapse_points: float = 35.0
+    tsas_exit_probability_floor: float = 0.35
+    tsas_exit_model_flip_floor: float = 0.30
+    tsas_exit_market_divergence_loss_pct: float = 35.0
+    tsas_exit_market_divergence_prob_stability_points: float = 5.0
+    tsas_exit_market_divergence_min_entry_price: float = 0.25
+    tsas_entry_market_conflict_divergence: float = 0.35
+    tsas_open_meteo_cache_ttl_seconds: int = 1800
+    tsas_intraday_window_hours: float = 10.0
+    tsas_monitor_adjustment_multiplier: float = 1.20
     
     # Kelly & EV Thresholds
     kelly_fraction: float = 0.1
@@ -53,22 +95,21 @@ class Settings(BaseSettings):
     
     # City-ICAO Mapping for Weather
     city_icao_mapping: Dict[str, str] = {
-        "London": "EGLC",
-        "Seoul": "RKSI",
+        "Austin": "KAUS",
+        "Miami": "KMIA",
+        "Wellington": "NZWN",
         "Chicago": "KORD",
         "Dallas": "KDAL",
         "Atlanta": "KATL",
-        "Tokyo": "RJTT",
+        "San Francisco": "KSFO",
+        "London": "EGLC",
         "Shanghai": "ZSPD",
-        "Singapore": "WSSS",
-        "Paris": "LFPG",
-        "New York": "KLGA",
+        "Milan": "LIMC",
+        "Munich": "EDDM",
+        "Beijing": "ZBAA",
+        "Taipei": "RCSS",
         "Los Angeles": "KLAX",
-        "Hong Kong": "VHHH",
-        "Madrid": "LEMD",
-        "Toronto": "CYYZ",
-        "Miami": "KMIA",
-        "Houston": "KHOU"
+        "Singapore": "WSSS",
     }
 
     class Config:

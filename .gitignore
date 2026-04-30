@@ -1,21 +1,38 @@
-# Секреты
+# Secrets
 .env
 *.env
 .env.local
 .env.production
 .env.development
 
-# Приватные данные
+# Data & DB (persist on Railway volume, not in git)
 data/
 historical_predictions.jsonl
-calibration.db
+*.db
+*.sqlite
 
-# Личные ключи
+# Private keys
 **/*private_key*
 **/*PRIVATE_KEY*
 **/*secret*
 
-# Логи и кэш
+# Logs
 *.log
+Logs.log
+logs/
+
+# Python
 __pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# OS
 .DS_Store
+
+# Local scratch & analysis
+scratch/
+reports/
+bot_analysis.md
